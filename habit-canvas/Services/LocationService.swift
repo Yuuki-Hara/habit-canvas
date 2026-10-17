@@ -199,13 +199,11 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     // MARK: - SwiftDataへの保存 ＆ 学習データの参照
-
     private func finalizeAndSave(
         bestLocation: CLLocation,
         arrival: Date,
         departure: Date?
     ) async {
-        // 1. 保存前に、過去の「手動修正済み（isManuallyEdited == true）」ログ一覧を取得しておく
         let learnedSnapshots = fetchLearnedPlaces()
 
         let coordinate = bestLocation.coordinate
@@ -219,10 +217,8 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         modelContext.insert(newLog)
         try? modelContext.save()
 
-        // 2. 学習データを渡してPlaceResolverを実行
         let resolved = await PlaceResolver.resolve(
             coordinate: coordinate,
-            arrivalDate: arrival,
             learnedPlaces: learnedSnapshots
         )
         
@@ -230,13 +226,11 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         newLog.rawCategory = resolved.primaryCategory
         newLog.lifeMode = resolved.majorityLifeMode
         newLog.candidates = resolved.candidates
-        // 学習履歴から自動マッチした場合は修正済みフラグも引き継ぐ
         if resolved.isMatchedFromHistory {
             newLog.isManuallyEdited = true
         }
         try? modelContext.save()
     }
-
     /// 過去にユーザーが手動で修正したログをSwiftDataから取得する（直近の修正を優先）
     private func fetchLearnedPlaces() -> [LearnedPlaceSnapshot] {
         let descriptor = FetchDescriptor<VisitLog>(

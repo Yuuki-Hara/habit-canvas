@@ -15,10 +15,9 @@ struct ResolvedPlaceResult {
     let primaryCategory: String
     let majorityLifeMode: LifeMode
     let candidates: [PlaceCandidate]
-    let isMatchedFromHistory: Bool // 過去の学習履歴から一致したかどうか
+    let isMatchedFromHistory: Bool
 }
 
-/// 過去の「手動修正済みログ」をPlaceResolverに渡すための軽量構造体
 struct LearnedPlaceSnapshot: Sendable {
     let placeName: String
     let rawCategory: String
@@ -28,33 +27,52 @@ struct LearnedPlaceSnapshot: Sendable {
 }
 
 enum PlaceResolver {
-    /// 滞在目的になりにくい「ノイズ施設」の除外リスト
     private static let excludedNoiseCategories: [MKPointOfInterestCategory] = [
-        .atm,               // ATM
-        .parking,           // コインパーキング・駐車場
-        .restroom,          // 公衆トイレ
-        .evCharger,         // EV充電器
-        .publicTransport,   // バス停・駅の出口など（店舗を優先するため除外）
-        .carRental,         // レンタカーポート
-        .gasStation         // ガソリンスタンド
+        .atm,
+        .parking,
+        .restroom,
+        .evCharger,
+        .publicTransport,
+        .carRental,
+        .gasStation
     ]
 
-    /// 過去の手動修正データを最優先し、新規の場所ではノイズ除外＋多数決で特定する
+    /// 0.自宅/仕事の登録判定 → 1.過去の手動修正履歴 → 2.MapKit検索(ノイズ除外+多数決) → 3.住所フォールバック の順で特定する
+    @MainActor
     static func resolve(
         coordinate: CLLocationCoordinate2D,
-        arrivalDate: Date = .now,
         learnedPlaces: [LearnedPlaceSnapshot] = []
     ) async -> ResolvedPlaceResult {
+        // 0. 【最優先】設定で事前登録された「自宅」「仕事」のエリア内か判定
+        if let registered = RegisteredPlacesStore.shared.matchRegisteredMode(for: coordinate) {
+            let label = registered.mode.rawValue // "自宅" または "仕事"（具体的な住所や店名は出さない）
+            let registeredCandidate = PlaceCandidate(
+                name: label,
+                rawCategory: "登録スポット",
+                lifeModeRaw: registered.mode.rawValue,
+                distanceMeters: registered.distance,
+                latitude: coordinate.latitude,
+                longitude: coordinate.longitude
+            )
+            return ResolvedPlaceResult(
+                primaryName: label,
+                primaryCategory: "登録スポット",
+                majorityLifeMode: registered.mode,
+                candidates: [registeredCandidate],
+                isMatchedFromHistory: true
+            )
+        }
+
         let targetLocation = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
 
-        // 1. 【学習ロジック】過去に手動修正した場所（半径40m以内）があれば最優先でチェック
+        // 1. 【学習ロジック】過去に手動修正した場所（半径40m以内）があればチェック
         let matchedLearnedPlace = learnedPlaces
             .map { place -> (place: LearnedPlaceSnapshot, distance: Double) in
                 let loc = CLLocation(latitude: place.latitude, longitude: place.longitude)
                 return (place, targetLocation.distance(from: loc))
             }
-            .filter { $0.distance <= 40.0 } // 半径40m以内
-            .min { $0.distance < $1.distance } // 複数あれば一番近い学習データ
+            .filter { $0.distance <= 40.0 }
+            .min { $0.distance < $1.distance }
 
         // 2. MapKitで周辺60m以内のPOI（ノイズ除外フィルター付き）を検索
         let request = MKLocalPointsOfInterestRequest(center: coordinate, radius: 60.0)
@@ -69,7 +87,6 @@ enum PlaceResolver {
             mapKitCandidates = response.mapItems
                 .compactMap { item -> PlaceCandidate? in
                     guard let name = item.name else { return nil }
-                    // 念のため、フィルターをすり抜けたノイズカテゴリも二重チェックで弾く
                     if let cat = item.pointOfInterestCategory, excludedNoiseCategories.contains(cat) {
                         return nil
                     }
@@ -77,7 +94,7 @@ enum PlaceResolver {
                     let itemLoc = item.placemark.location ?? targetLocation
                     let dist = targetLocation.distance(from: itemLoc)
                     let rawCat = item.pointOfInterestCategory?.rawValue ?? "カテゴリなし（POI）"
-                    let mode = LifeMode.classify(rawCategory: item.pointOfInterestCategory?.rawValue, arrivalDate: arrivalDate)
+                    let mode = LifeMode.classify(rawCategory: item.pointOfInterestCategory?.rawValue)
                     
                     return PlaceCandidate(
                         name: name,
@@ -93,9 +110,8 @@ enum PlaceResolver {
             print("POI検索結果なし（または失敗）: \(error.localizedDescription)")
         }
 
-        // 3. もし半径40m以内に「過去の手動修正履歴」が見つかっていた場合は、それを無条件で1位に採用！
+        // 3. 半径40m以内に過去の手動修正履歴があれば1位に採用
         if let learned = matchedLearnedPlace {
-            print("✨ 過去の学習データにヒットしました: \(learned.place.placeName) (距離: \(Int(learned.distance))m)")
             let learnedCandidate = PlaceCandidate(
                 name: learned.place.placeName,
                 rawCategory: learned.place.rawCategory,
@@ -104,8 +120,6 @@ enum PlaceResolver {
                 latitude: learned.place.latitude,
                 longitude: learned.place.longitude
             )
-            
-            // 候補リストの先頭に学習データを入れ、残りにMapKitの候補（重複除く）を並べる
             let otherCandidates = mapKitCandidates.filter { $0.name != learned.place.placeName }
             let combinedCandidates = Array(([learnedCandidate] + otherCandidates).prefix(8))
             
@@ -118,7 +132,7 @@ enum PlaceResolver {
             )
         }
 
-        // 4. 学習データにない新規の場所：MapKitの候補リストから上位5件の多数決で決定
+        // 4. 新規の場所：MapKit候補から上位5件の多数決でライフモードを決定
         let topCandidates = Array(mapKitCandidates.prefix(8))
         if let closest = topCandidates.first {
             let top5Modes = topCandidates.prefix(5).map { $0.lifeMode }
@@ -133,10 +147,8 @@ enum PlaceResolver {
             )
         }
 
-        // 5. フォールバック：周囲に店舗がない場合（住宅街など）は逆ジオコーディングで住所を取得
+        // 5. フォールバック：周囲に施設がない場所（未登録の住宅街など）は「その他」として住所を表示
         let geocoder = CLGeocoder()
-        let heuristicMode = LifeMode.classifyByTimeHeuristics(arrivalDate: arrivalDate)
-        
         do {
             let placemarks = try await geocoder.reverseGeocodeLocation(targetLocation)
             if let pm = placemarks.first {
@@ -145,7 +157,7 @@ enum PlaceResolver {
                 let fallbackCandidate = PlaceCandidate(
                     name: finalName,
                     rawCategory: "住所（施設なし）",
-                    lifeModeRaw: heuristicMode.rawValue,
+                    lifeModeRaw: LifeMode.other.rawValue,
                     distanceMeters: 0,
                     latitude: coordinate.latitude,
                     longitude: coordinate.longitude
@@ -153,7 +165,7 @@ enum PlaceResolver {
                 return ResolvedPlaceResult(
                     primaryName: finalName,
                     primaryCategory: "住所（施設なし）",
-                    majorityLifeMode: heuristicMode,
+                    majorityLifeMode: .other,
                     candidates: [fallbackCandidate],
                     isMatchedFromHistory: false
                 )
@@ -165,13 +177,12 @@ enum PlaceResolver {
         return ResolvedPlaceResult(
             primaryName: "特定できない場所",
             primaryCategory: "不明",
-            majorityLifeMode: heuristicMode,
+            majorityLifeMode: .other,
             candidates: [],
             isMatchedFromHistory: false
         )
     }
 
-    /// ライフモード配列の中から最も多いものを返す（同数の場合は1位の店舗のモードを優先）
     private static func calculateMajorityLifeMode(from modes: [LifeMode], fallback: LifeMode) -> LifeMode {
         guard !modes.isEmpty else { return fallback }
         var counts: [LifeMode: Int] = [:]

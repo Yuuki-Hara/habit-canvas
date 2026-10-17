@@ -199,11 +199,12 @@ struct VisitDetailSheetView: View {
     }
 
     /// マップ中央の新しい座標で周辺候補を再検索し、結果を更新する
-    private func searchCandidatesAtMapCenter() async {
+private func searchCandidatesAtMapCenter() async {
         isSearchingAtNewCenter = true
         defer { isSearchingAtNewCenter = false }
 
-        let resolved = await PlaceResolver.resolve(coordinate: mapCenterCoordinate, arrivalDate: visit.arrivalDate)
+        // ↓ arrivalDate 引数を外す
+        let resolved = await PlaceResolver.resolve(coordinate: mapCenterCoordinate)
         visit.latitude = mapCenterCoordinate.latitude
         visit.longitude = mapCenterCoordinate.longitude
         visit.placeName = resolved.primaryName

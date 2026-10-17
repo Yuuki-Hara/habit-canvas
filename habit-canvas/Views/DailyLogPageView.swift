@@ -16,6 +16,7 @@ struct DailyLogPageView: View {
     
     @State private var selectedDate: Date = .now
     @State private var selectedVisitForDetail: VisitLog?
+    @State private var isShowingBaseSettings: Bool = false
 
     private var dailyVisits: [VisitLog] {
         let calendar = Calendar.current
@@ -38,7 +39,6 @@ struct DailyLogPageView: View {
                     .frame(height: 230)
                 Divider()
 
-                // 滞在場所一覧ヘッダー ＋ テスト記録ボタン（リトライ状況表示付き）
                 VStack(spacing: 6) {
                     HStack {
                         Text("滞在場所一覧 (\(dailyVisits.count)件)")
@@ -80,13 +80,12 @@ struct DailyLogPageView: View {
                 .padding(.vertical, 10)
                 .background(Color(.systemGroupedBackground))
 
-                // カードリスト
                 ScrollView {
                     if dailyVisits.isEmpty {
                         ContentUnavailableView(
                             "この日の滞在記録はありません",
                             systemImage: "mappin.slash",
-                            description: Text("右上の「現在地を記録」ボタンを押すと、精度5m基準（最大3回再試行）で現在地を記録します。")
+                            description: Text("右上の⚙️ボタンから「自宅」「仕事」を事前登録しておくと、該当エリアの記録がシンプルに表示されます。")
                         )
                         .padding(.top, 30)
                     } else {
@@ -106,8 +105,20 @@ struct DailyLogPageView: View {
             }
             .navigationTitle("HabitCanvas PoC")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        isShowingBaseSettings = true
+                    } label: {
+                        Label("自宅・仕事設定", systemImage: "gearshape.fill")
+                    }
+                }
+            }
             .sheet(item: $selectedVisitForDetail) { visit in
                 VisitDetailSheetView(visit: visit)
+            }
+            .sheet(isPresented: $isShowingBaseSettings) {
+                BaseLocationSettingsSheetView()
             }
         }
     }

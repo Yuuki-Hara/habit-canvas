@@ -11,7 +11,6 @@ import SwiftData
 import CoreLocation
 import MapKit
 
-/// 6つのライフモード定義
 enum LifeMode: String, Codable, CaseIterable, Identifiable {
     case home = "自宅"
     case work = "仕事"
@@ -37,10 +36,10 @@ enum LifeMode: String, Codable, CaseIterable, Identifiable {
         "\(icon) \(rawValue)"
     }
 
-    /// MapKitのカテゴリと到着日時からライフモードを判定する
-    static func classify(rawCategory: String?, arrivalDate: Date) -> LifeMode {
+    /// MapKitのカテゴリからライフモードを判定する（自宅・仕事は事前登録座標で判定するためここには含めない）
+    static func classify(rawCategory: String?) -> LifeMode {
         guard let raw = rawCategory else {
-            return classifyByTimeHeuristics(arrivalDate: arrivalDate)
+            return .other
         }
 
         let category = MKPointOfInterestCategory(rawValue: raw)
@@ -55,33 +54,14 @@ enum LifeMode: String, Codable, CaseIterable, Identifiable {
         case .movieTheater, .theater, .nightlife, .park, .amusementPark, .aquarium, .beach, .campground, .marina, .nationalPark, .stadium, .zoo:
             return .leisure
         default:
-            // BookstoreなどiOSバージョン依存の文字列も含めて判定
             if raw.lowercased().contains("bookstore") || raw.lowercased().contains("library") {
                 return .selfInvestment
             }
             return .other
         }
     }
-
-    /// POIがない場所（住宅街やオフィス街など）の時間帯判定
-    static func classifyByTimeHeuristics(arrivalDate: Date) -> LifeMode {
-        let calendar = Calendar.current
-        let hour = calendar.component(.hour, from: arrivalDate)
-        let isWeekend = calendar.isDateInWeekend(arrivalDate)
-
-        // 深夜22時〜朝7時の滞在開始は「自宅」と仮判定
-        if hour >= 22 || hour <= 7 {
-            return .home
-        }
-        // 平日9時〜18時の滞在開始は「仕事」と仮判定
-        if !isWeekend && (9...18).contains(hour) {
-            return .work
-        }
-        return .other
-    }
 }
 
-/// 周辺の施設候補データ（JSONとしてVisitLog内に保存可能にする）
 struct PlaceCandidate: Codable, Identifiable, Hashable {
     var id: String { "\(name)_\(latitude)_\(longitude)" }
     let name: String
@@ -108,7 +88,7 @@ final class VisitLog {
     var rawCategory: String
     var lifeModeRaw: String
     var isManuallyEdited: Bool
-    var candidatesData: Data? // 周辺候補リスト（JSONエンコードデータ）
+    var candidatesData: Data?
 
     init(
         id: UUID = UUID(),
