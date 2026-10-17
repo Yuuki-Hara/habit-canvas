@@ -17,7 +17,6 @@ struct DailyLogPageView: View {
     @State private var selectedDate: Date = .now
     @State private var selectedVisitForDetail: VisitLog?
 
-    /// 選択された日付の 00:00 〜 23:59 のログだけを抽出
     private var dailyVisits: [VisitLog] {
         let calendar = Calendar.current
         return allVisits.filter { calendar.isDate($0.arrivalDate, inSameDayAs: selectedDate) }
@@ -26,60 +25,68 @@ struct DailyLogPageView: View {
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
-                // 1. 権限が未許可の場合のバナー
                 if locationService.authorizationStatus != .authorizedAlways {
                     PermissionBannerView(status: locationService.authorizationStatus) {
                         locationService.requestPermission()
                     }
                 }
 
-                // 2. 日付切り替えバー
                 DateHeaderView(selectedDate: $selectedDate)
-                
                 Divider()
 
-                // 3. マップビュー（ピン表示）
                 DailyMapView(visits: dailyVisits)
-                    .frame(height: 240)
-
+                    .frame(height: 230)
                 Divider()
 
-                // 4. 滞在場所カード一覧ヘッダー ＋ テスト記録ボタン
-                HStack {
-                    Text("滞在場所一覧 (\(dailyVisits.count)件)")
-                        .font(.subheadline.bold())
-                        .foregroundStyle(.secondary)
-                    
-                    Spacer()
-                    
-                    Button {
-                        locationService.recordCurrentLocationForTest()
-                    } label: {
-                        HStack(spacing: 4) {
-                            if locationService.isRecordingTestLocation {
-                                ProgressView().controlSize(.small)
-                            } else {
-                                Image(systemName: "plus.circle.fill")
+                // 滞在場所一覧ヘッダー ＋ テスト記録ボタン（リトライ状況表示付き）
+                VStack(spacing: 6) {
+                    HStack {
+                        Text("滞在場所一覧 (\(dailyVisits.count)件)")
+                            .font(.subheadline.bold())
+                            .foregroundStyle(.secondary)
+                        
+                        Spacer()
+                        
+                        Button {
+                            locationService.recordCurrentLocationForTest()
+                        } label: {
+                            HStack(spacing: 4) {
+                                if locationService.isRecordingTestLocation {
+                                    ProgressView().controlSize(.small)
+                                } else {
+                                    Image(systemName: "plus.circle.fill")
+                                }
+                                Text("現在地を記録(検証用)")
                             }
-                            Text("現在地を記録(検証用)")
+                            .font(.caption.bold())
                         }
-                        .font(.caption.bold())
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(locationService.isRecordingTestLocation)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(locationService.isRecordingTestLocation)
+
+                    if !locationService.retryStatusText.isEmpty {
+                        HStack {
+                            Image(systemName: "antenna.radiowaves.left.and.right")
+                                .font(.caption2)
+                            Text(locationService.retryStatusText)
+                                .font(.caption2)
+                            Spacer()
+                        }
+                        .foregroundStyle(.orange)
+                    }
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 10)
                 .background(Color(.systemGroupedBackground))
 
-                // 5. カードリスト（縦並び）
+                // カードリスト
                 ScrollView {
                     if dailyVisits.isEmpty {
                         ContentUnavailableView(
                             "この日の滞在記録はありません",
                             systemImage: "mappin.slash",
-                            description: Text("15分以上同じ場所に滞在するか、右上の「現在地を記録」ボタンでテスト記録を追加できます。")
+                            description: Text("右上の「現在地を記録」ボタンを押すと、精度5m基準（最大3回再試行）で現在地を記録します。")
                         )
                         .padding(.top, 30)
                     } else {
@@ -106,7 +113,6 @@ struct DailyLogPageView: View {
     }
 }
 
-// MARK: - 権限リクエストバナー
 struct PermissionBannerView: View {
     let status: CLAuthorizationStatus
     let onRequest: () -> Void

@@ -16,30 +16,39 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
     private let manager = CLLocationManager()
     private let modelContext: ModelContext
     
+    // 精度閾値（5.0m）と最大リトライ回数（3回）
+    private let accuracyThreshold: Double = 5.0
+    private let maxRetries: Int = 3
+    
     @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
     @Published var isRecordingTestLocation: Bool = false
+    @Published var retryStatusText: String = ""
+
+    private var collectedLocations: [CLLocation] = []
+    private var currentRetryCount: Int = 0
+    private var pendingArrivalDate: Date = .now
+    private var pendingDepartureDate: Date? = nil
+    private var isCollectingSamples: Bool = false
+    private var samplingTimeoutTask: Task<Void, Never>?
 
     init(modelContext: ModelContext) {
         self.modelContext = modelContext
         super.init()
         manager.delegate = self
-        manager.desiredAccuracy = kCLLocationAccuracyBest
+        manager.desiredAccuracy = kCLLocationAccuracyBestForNavigation
+        manager.allowsBackgroundLocationUpdates = true
         manager.pausesLocationUpdatesAutomatically = false
         self.authorizationStatus = manager.authorizationStatus
-        manager.allowsBackgroundLocationUpdates = manager.authorizationStatus == .authorizedAlways
         
         startMonitoringIfAuthorized()
     }
 
-    /// 位置情報の権限リクエスト（「使用中のみ」→「常に許可」の順）
     func requestPermission() {
         switch manager.authorizationStatus {
         case .notDetermined:
             manager.requestWhenInUseAuthorization()
         case .authorizedWhenInUse:
             manager.requestAlwaysAuthorization()
-        case .authorizedAlways:
-            manager.allowsBackgroundLocationUpdates = true
         default:
             break
         }
@@ -52,16 +61,80 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
-    /// 【検証用】15分待たずに、今の現在地を即座に1件の滞在ログとして記録する
+    /// 【検証用】ボタン押下で高精度サンプリング（閾値5m・最大3回リトライ）を開始する
     func recordCurrentLocationForTest() {
-        guard !isRecordingTestLocation else { return }
+        guard !isCollectingSamples else { return }
         isRecordingTestLocation = true
-        manager.requestLocation()
+        startHighAccuracySampling(initialLocation: nil, arrival: .now, departure: nil)
     }
-    
-    private func configureBackgroundLocationUpdatesIfNeeded() {
-        let hasBackgroundLocationMode = (Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String])?.contains("location") == true
-        manager.allowsBackgroundLocationUpdates = hasBackgroundLocationMode && manager.authorizationStatus == .authorizedAlways
+
+    private func startHighAccuracySampling(
+        initialLocation: CLLocation?,
+        arrival: Date,
+        departure: Date?
+    ) {
+        collectedLocations.removeAll()
+        if let initial = initialLocation, initial.horizontalAccuracy > 0 {
+            collectedLocations.append(initial)
+            if initial.horizontalAccuracy <= accuracyThreshold {
+                Task {
+                    await finalizeAndSave(bestLocation: initial, arrival: arrival, departure: departure)
+                }
+                return
+            }
+        }
+
+        currentRetryCount = 0
+        pendingArrivalDate = arrival
+        pendingDepartureDate = departure
+        isCollectingSamples = true
+        retryStatusText = "高精度GPS計測中 (初回)..."
+
+        manager.startUpdatingLocation()
+        scheduleTimeoutForCurrentAttempt()
+    }
+
+    private func scheduleTimeoutForCurrentAttempt() {
+        samplingTimeoutTask?.cancel()
+        samplingTimeoutTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled, self.isCollectingSamples else { return }
+            self.advanceRetryOrFinalize()
+        }
+    }
+
+    private func advanceRetryOrFinalize() {
+        if currentRetryCount < maxRetries {
+            currentRetryCount += 1
+            retryStatusText = "精度5m超過のため再試行中 (\(currentRetryCount)/\(maxRetries)回目)..."
+            print(retryStatusText)
+            scheduleTimeoutForCurrentAttempt()
+        } else {
+            finishSamplingWithBestLocation()
+        }
+    }
+
+    private func finishSamplingWithBestLocation() {
+        samplingTimeoutTask?.cancel()
+        manager.stopUpdatingLocation()
+        isCollectingSamples = false
+        isRecordingTestLocation = false
+        retryStatusText = ""
+
+        guard let bestLocation = collectedLocations
+            .filter({ $0.horizontalAccuracy > 0 })
+            .min(by: { $0.horizontalAccuracy < $1.horizontalAccuracy }) else {
+            print("有効な位置情報が1件も取得できませんでした")
+            return
+        }
+
+        print("採用されたベスト座標の精度: ±\(String(format: "%.1f", bestLocation.horizontalAccuracy))m (計\(collectedLocations.count)サンプル中)")
+
+        let arrival = pendingArrivalDate
+        let departure = pendingDepartureDate
+        Task {
+            await finalizeAndSave(bestLocation: bestLocation, arrival: arrival, departure: departure)
+        }
     }
 
     // MARK: - CLLocationManagerDelegate
@@ -70,7 +143,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         let status = manager.authorizationStatus
         Task { @MainActor in
             self.authorizationStatus = status
-            self.manager.allowsBackgroundLocationUpdates = status == .authorizedAlways
             self.startMonitoringIfAuthorized()
             if status == .authorizedWhenInUse {
                 manager.requestAlwaysAuthorization()
@@ -78,69 +150,109 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
-    /// 本番用：OSが「滞在（CLVisit）」を検知したときに自動で呼ばれる
     nonisolated func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
-        let coordinate = visit.coordinate
         let arrival = visit.arrivalDate == Date.distantPast ? Date() : visit.arrivalDate
         let departure = visit.departureDate == Date.distantFuture ? nil : visit.departureDate
-        let accuracy = visit.horizontalAccuracy
+        let initialLoc = CLLocation(
+            coordinate: visit.coordinate,
+            altitude: 0,
+            horizontalAccuracy: visit.horizontalAccuracy,
+            verticalAccuracy: -1,
+            timestamp: Date()
+        )
 
         Task { @MainActor in
-            await saveVisitLog(
-                coordinate: coordinate,
-                arrival: arrival,
-                departure: departure,
-                accuracy: accuracy
-            )
+            if visit.horizontalAccuracy > 0 && visit.horizontalAccuracy <= self.accuracyThreshold {
+                await self.finalizeAndSave(bestLocation: initialLoc, arrival: arrival, departure: departure)
+            } else {
+                self.startHighAccuracySampling(initialLocation: initialLoc, arrival: arrival, departure: departure)
+            }
         }
     }
 
-    /// 検証用：`recordCurrentLocationForTest()` で現在地を取得したときに呼ばれる
     nonisolated func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
-        guard let location = locations.last else { return }
+        let freshLocations = locations.filter {
+            $0.horizontalAccuracy > 0 && abs($0.timestamp.timeIntervalSinceNow) < 5.0
+        }
+        guard let latest = freshLocations.last else { return }
+
         Task { @MainActor in
-            guard self.isRecordingTestLocation else { return }
-            self.isRecordingTestLocation = false
-            
-            await saveVisitLog(
-                coordinate: location.coordinate,
-                arrival: Date(),
-                departure: nil,
-                accuracy: location.horizontalAccuracy
-            )
+            guard self.isCollectingSamples else { return }
+            self.collectedLocations.append(latest)
+            print("GPS受信 [試行\(self.currentRetryCount)]: 精度 ±\(String(format: "%.1f", latest.horizontalAccuracy))m")
+
+            if latest.horizontalAccuracy <= self.accuracyThreshold {
+                print("閾値(\(self.accuracyThreshold)m)以下を達成したため即採用します！")
+                self.finishSamplingWithBestLocation()
+            } else {
+                self.advanceRetryOrFinalize()
+            }
         }
     }
 
     nonisolated func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
-        print("位置情報エラー: \(error.localizedDescription)")
+        print("位置情報取得エラー: \(error.localizedDescription)")
         Task { @MainActor in
-            self.isRecordingTestLocation = false
+            guard self.isCollectingSamples else { return }
+            self.advanceRetryOrFinalize()
         }
     }
 
-    // MARK: - 保存処理
+    // MARK: - SwiftDataへの保存 ＆ 学習データの参照
 
-    private func saveVisitLog(
-        coordinate: CLLocationCoordinate2D,
+    private func finalizeAndSave(
+        bestLocation: CLLocation,
         arrival: Date,
-        departure: Date?,
-        accuracy: Double
+        departure: Date?
     ) async {
-        // 1. まずログを作成して挿入
+        // 1. 保存前に、過去の「手動修正済み（isManuallyEdited == true）」ログ一覧を取得しておく
+        let learnedSnapshots = fetchLearnedPlaces()
+
+        let coordinate = bestLocation.coordinate
         let newLog = VisitLog(
             arrivalDate: arrival,
             departureDate: departure,
             latitude: coordinate.latitude,
             longitude: coordinate.longitude,
-            horizontalAccuracy: accuracy
+            horizontalAccuracy: bestLocation.horizontalAccuracy
         )
         modelContext.insert(newLog)
         try? modelContext.save()
 
-        // 2. MapKitで店名とカテゴリを特定して更新
-        let resolved = await PlaceResolver.resolve(coordinate: coordinate)
-        newLog.placeName = resolved.name
-        newLog.rawCategory = resolved.category
+        // 2. 学習データを渡してPlaceResolverを実行
+        let resolved = await PlaceResolver.resolve(
+            coordinate: coordinate,
+            arrivalDate: arrival,
+            learnedPlaces: learnedSnapshots
+        )
+        
+        newLog.placeName = resolved.primaryName
+        newLog.rawCategory = resolved.primaryCategory
+        newLog.lifeMode = resolved.majorityLifeMode
+        newLog.candidates = resolved.candidates
+        // 学習履歴から自動マッチした場合は修正済みフラグも引き継ぐ
+        if resolved.isMatchedFromHistory {
+            newLog.isManuallyEdited = true
+        }
         try? modelContext.save()
+    }
+
+    /// 過去にユーザーが手動で修正したログをSwiftDataから取得する（直近の修正を優先）
+    private func fetchLearnedPlaces() -> [LearnedPlaceSnapshot] {
+        let descriptor = FetchDescriptor<VisitLog>(
+            predicate: #Predicate { $0.isManuallyEdited == true },
+            sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
+        )
+        guard let editedLogs = try? modelContext.fetch(descriptor) else { return [] }
+        
+        return editedLogs.map { log in
+            LearnedPlaceSnapshot(
+                placeName: log.placeName,
+                rawCategory: log.rawCategory,
+                lifeMode: log.lifeMode,
+                latitude: log.latitude,
+                longitude: log.longitude
+            )
+        }
     }
 }
