@@ -1,3 +1,11 @@
+//
+//  VisitLog.swift
+//  habit-canvas
+//
+//  Created by 原裕貴 on 2026/10/16.
+//
+
+
 import Foundation
 import SwiftData
 import CoreLocation

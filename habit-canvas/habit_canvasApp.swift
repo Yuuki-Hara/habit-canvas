@@ -9,24 +9,31 @@ import SwiftUI
 import SwiftData
 
 @main
-struct habit_canvasApp: App {
-    var sharedModelContainer: ModelContainer = {
-        let schema = Schema([
-            VisitLog.self,
-        ])
-        let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+struct HabitCanvasPoCApp: App {
+    // SwiftDataのコンテナを初期化
+    let container: ModelContainer
+    @StateObject private var locationService: LocationService
 
+    init() {
         do {
-            return try ModelContainer(for: schema, configurations: [modelConfiguration])
+            let schema = Schema([VisitLog.self])
+            let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
+            let modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
+            self.container = modelContainer
+            
+            // LocationServiceにMainContextを渡して初期化
+            let service = LocationService(modelContext: modelContainer.mainContext)
+            _locationService = StateObject(wrappedValue: service)
         } catch {
-            fatalError("Could not create ModelContainer: \(error)")
+            fatalError("SwiftDataの初期化に失敗しました: \(error)")
         }
-    }()
+    }
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            DailyLogPageView()
+                .environmentObject(locationService)
         }
-        .modelContainer(sharedModelContainer)
+        .modelContainer(container)
     }
 }

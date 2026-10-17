@@ -1,3 +1,11 @@
+//
+//  ResolvedPlace.swift
+//  habit-canvas
+//
+//  Created by 原裕貴 on 2026/10/16.
+//
+
+
 import Foundation
 import MapKit
 import CoreLocation
@@ -21,8 +29,8 @@ enum PlaceResolver {
             
             // 最も距離が近い施設（MKMapItem）を探す
             let closestItem = response.mapItems.min { itemA, itemB in
-                let locA = itemA.placemark.location ?? targetLocation
-                let locB = itemB.placemark.location ?? targetLocation
+                let locA = itemA.location
+                let locB = itemB.location
                 return targetLocation.distance(from: locA) < targetLocation.distance(from: locB)
             }
             

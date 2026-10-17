@@ -1,3 +1,11 @@
+//
+//  DailyLogPageView.swift
+//  habit-canvas
+//
+//  Created by 原裕貴 on 2026/10/16.
+//
+
+
 import SwiftUI
 import SwiftData
 import MapKit

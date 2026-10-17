@@ -1,6 +1,15 @@
+//
+//  LocationService.swift
+//  habit-canvas
+//
+//  Created by 原裕貴 on 2026/10/16.
+//
+
+
 import Foundation
 import CoreLocation
 import SwiftData
+import Combine
 
 @MainActor
 final class LocationService: NSObject, ObservableObject, CLLocationManagerDelegate {
@@ -15,9 +24,9 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         super.init()
         manager.delegate = self
         manager.desiredAccuracy = kCLLocationAccuracyBest
-        manager.allowsBackgroundLocationUpdates = true
         manager.pausesLocationUpdatesAutomatically = false
         self.authorizationStatus = manager.authorizationStatus
+        manager.allowsBackgroundLocationUpdates = manager.authorizationStatus == .authorizedAlways
         
         startMonitoringIfAuthorized()
     }
@@ -29,6 +38,8 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
             manager.requestWhenInUseAuthorization()
         case .authorizedWhenInUse:
             manager.requestAlwaysAuthorization()
+        case .authorizedAlways:
+            manager.allowsBackgroundLocationUpdates = true
         default:
             break
         }
@@ -47,6 +58,11 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         isRecordingTestLocation = true
         manager.requestLocation()
     }
+    
+    private func configureBackgroundLocationUpdatesIfNeeded() {
+        let hasBackgroundLocationMode = (Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String])?.contains("location") == true
+        manager.allowsBackgroundLocationUpdates = hasBackgroundLocationMode && manager.authorizationStatus == .authorizedAlways
+    }
 
     // MARK: - CLLocationManagerDelegate
 
@@ -54,8 +70,8 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         let status = manager.authorizationStatus
         Task { @MainActor in
             self.authorizationStatus = status
+            self.manager.allowsBackgroundLocationUpdates = status == .authorizedAlways
             self.startMonitoringIfAuthorized()
-            // 使用中許可が下りたら、続けて「常に許可」も促す
             if status == .authorizedWhenInUse {
                 manager.requestAlwaysAuthorization()
             }
