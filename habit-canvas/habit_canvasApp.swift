@@ -10,7 +10,6 @@ import SwiftData
 
 @main
 struct HabitCanvasPoCApp: App {
-    // SwiftDataのコンテナを初期化
     let container: ModelContainer
     @StateObject private var locationService: LocationService
 
@@ -21,7 +20,6 @@ struct HabitCanvasPoCApp: App {
             let modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
             self.container = modelContainer
             
-            // LocationServiceにMainContextを渡して初期化
             let service = LocationService(modelContext: modelContainer.mainContext)
             _locationService = StateObject(wrappedValue: service)
         } catch {
@@ -31,7 +29,7 @@ struct HabitCanvasPoCApp: App {
 
     var body: some Scene {
         WindowGroup {
-            DailyLogPageView()
+            MainTabView() // ← ここを MainTabView() に変更
                 .environmentObject(locationService)
         }
         .modelContainer(container)
