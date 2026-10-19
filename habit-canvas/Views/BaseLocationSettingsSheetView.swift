@@ -9,10 +9,13 @@
 import SwiftUI
 import MapKit
 import CoreLocation
+import SwiftData
 
 struct BaseLocationSettingsSheetView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject private var store = RegisteredPlacesStore.shared
+    @Query(sort: \CLVisitDebugLog.receivedAt, order: .reverse) private var debugLogs: [CLVisitDebugLog]
+    @FocusState private var isMinutesFieldFocused: Bool
 
     enum TargetType: String, CaseIterable, Identifiable {
         case home = "🏠 自宅"
@@ -28,8 +31,56 @@ struct BaseLocationSettingsSheetView: View {
     var body: some View {
         NavigationStack {
             List {
+                // 0. 【追加】デバッグ設定 ＆ CLVisit生ログ確認セクション
+                Section {
+                    HStack {
+                        Label("最小滞在時間", systemImage: "timer")
+                            .font(.subheadline.bold())
+
+                        Spacer()
+
+                        TextField("分", value: $store.minimumStayMinutes, format: .number)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 55)
+                            .padding(.vertical, 4)
+                            .padding(.horizontal, 8)
+                            .background(Color(.tertiarySystemFill))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .focused($isMinutesFieldFocused)
+
+                        Text("分以上")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        Stepper("", value: $store.minimumStayMinutes, in: 0...180, step: 1)
+                            .labelsHidden()
+                    }
+
+                    NavigationLink {
+                        CLVisitDebugLogListView()
+                    } label: {
+                        HStack {
+                            Label("CLVisit 受信ログを確認", systemImage: "list.bullet.rectangle.portrait")
+                                .font(.subheadline.bold())
+                            Spacer()
+                            Text("\(debugLogs.count)件")
+                                .font(.caption.bold())
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(Color.blue.opacity(0.15))
+                                .foregroundStyle(.blue)
+                                .clipShape(Capsule())
+                        }
+                    }
+                } header: {
+                    Text("デバッグ・滞在判定設定")
+                } footer: {
+                    Text("現在設定: \(store.minimumStayMinutes)分（\(Int(store.minimumStayDurationSeconds))秒）未満の立ち止まりは自動記録から除外されます。0分にするとすべての確定滞在を記録します。")
+                }
+
                 // 1. 現在の登録ステータス
-                Section("現在の登録状態") {
+                Section("自宅・仕事の登録状態") {
                     registeredRow(
                         title: "🏠 自宅 (半径\(Int(store.homeRadiusMeters))m)",
                         coordinate: store.homeCoordinate,
@@ -62,16 +113,11 @@ struct BaseLocationSettingsSheetView: View {
                     .padding(.vertical, 4)
                     .onChange(of: selectedTarget) { _, newTarget in
                         duplicateWarningMessage = nil
-                        // タブを切り替えた際、すでに登録済みの場所があればそこへカメラを移動する
                         switch newTarget {
                         case .home:
-                            if let home = store.homeCoordinate {
-                                focusMap(on: home)
-                            }
+                            if let home = store.homeCoordinate { focusMap(on: home) }
                         case .work:
-                            if let work = store.workCoordinate {
-                                focusMap(on: work)
-                            }
+                            if let work = store.workCoordinate { focusMap(on: work) }
                         }
                     }
 
@@ -93,19 +139,16 @@ struct BaseLocationSettingsSheetView: View {
                                     .foregroundStyle(.blue.opacity(0.2))
                             }
                         }
-                        // .continuous にすることで、初期表示直後や微調整でも常に中央座標を最新に保つ
                         .onMapCameraChange(frequency: .continuous) { context in
                             mapCenterCoordinate = context.region.center
                         }
                         .frame(height: 280)
 
-                        // 中央の照準（＋）
                         Image(systemName: "plus.viewfinder")
                             .font(.title)
                             .foregroundStyle(selectedTarget == .home ? .green : .blue)
                             .allowsHitTesting(false)
 
-                        // 上部：現在の照準座標プレビュー
                         VStack {
                             if let center = mapCenterCoordinate {
                                 Text(String(format: "照準座標: %.5f, %.5f", center.latitude, center.longitude))
@@ -118,7 +161,6 @@ struct BaseLocationSettingsSheetView: View {
                             }
                             Spacer()
 
-                            // 下部：登録ボタン
                             Button {
                                 registerCurrentMapCenter()
                             } label: {
@@ -152,18 +194,24 @@ struct BaseLocationSettingsSheetView: View {
                     Text("1. 上のタブで「🏠 自宅」か「🏢 仕事」を選びます。\n2. 地図を動かして中央の「＋」を実際の建物に合わせ、下の登録ボタンを押してください。")
                 }
             }
-            .navigationTitle("自宅・仕事の事前登録")
+            .navigationTitle("設定・デバッグ")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完了") {
+                        isMinutesFieldFocused = false
                         dismiss()
                     }
                     .bold()
                 }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完了") {
+                        isMinutesFieldFocused = false
+                    }
+                }
             }
             .onAppear {
-                // 初回表示時、自宅が登録済みならそこにフォーカス、なければ現在地へ
                 if let home = store.homeCoordinate {
                     focusMap(on: home)
                 } else {

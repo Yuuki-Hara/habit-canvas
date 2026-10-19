@@ -15,7 +15,8 @@ struct HabitCanvasPoCApp: App {
 
     init() {
         do {
-            let schema = Schema([VisitLog.self])
+            // ↓ VisitLog.self に加えて CLVisitDebugLog.self を追加
+            let schema = Schema([VisitLog.self, CLVisitDebugLog.self])
             let modelConfiguration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: false)
             let modelContainer = try ModelContainer(for: schema, configurations: [modelConfiguration])
             self.container = modelContainer
@@ -29,7 +30,7 @@ struct HabitCanvasPoCApp: App {
 
     var body: some Scene {
         WindowGroup {
-            MainTabView() // ← ここを MainTabView() に変更
+            MainTabView()
                 .environmentObject(locationService)
         }
         .modelContainer(container)

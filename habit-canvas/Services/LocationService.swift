@@ -20,8 +20,10 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
     private let accuracyThreshold: Double = 5.0
     private let maxRetries: Int = 3
     
-    // 【追加】最小滞在時間フィルター（10分 = 600秒未満の立ち止まりは記録しない）
-    private let minimumStayDurationSeconds: TimeInterval = 10 * 60
+    /// 設定画面で指定された最小滞在時間（秒）を動的に取得する
+    private var minimumStayDurationSeconds: TimeInterval {
+        RegisteredPlacesStore.shared.minimumStayDurationSeconds
+    }
     
     @Published var authorizationStatus: CLAuthorizationStatus = .notDetermined
     @Published var isRecordingTestLocation: Bool = false
@@ -64,7 +66,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
-    /// 【検証用】ボタン押下で高精度サンプリング（手動テスト記録は時間フィルター対象外で即記録）
     func recordCurrentLocationForTest() {
         guard !isCollectingSamples else { return }
         isRecordingTestLocation = true
@@ -110,7 +111,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         if currentRetryCount < maxRetries {
             currentRetryCount += 1
             retryStatusText = "精度5m超過のため再試行中 (\(currentRetryCount)/\(maxRetries)回目)..."
-            print(retryStatusText)
             scheduleTimeoutForCurrentAttempt()
         } else {
             finishSamplingWithBestLocation()
@@ -127,7 +127,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         guard let bestLocation = collectedLocations
             .filter({ $0.horizontalAccuracy > 0 })
             .min(by: { $0.horizontalAccuracy < $1.horizontalAccuracy }) else {
-            print("有効な位置情報が1件も取得できませんでした")
             return
         }
 
@@ -151,7 +150,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
-    /// 本番用：OSが「滞在（CLVisit）」を検知したときに呼ばれる
     nonisolated func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
         let rawArrival = visit.arrivalDate
         let rawDeparture = visit.departureDate
@@ -168,62 +166,112 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
-    /// CLVisitの時刻逆転防止・短時間滞在の除外・出発時刻の更新を一括処理する
+    /// CLVisitの受信生ログを保存しつつ、フィルター判定とVisitLog保存を行う
     private func handleIncomingVisit(
         rawArrival: Date,
         rawDeparture: Date,
         coordinate: CLLocationCoordinate2D,
         accuracy: Double
     ) {
-        // 1. 到着時刻が不明（distantPast）な場合は、開始・終了時刻の逆転原因になるため無視する
+        let currentMinSeconds = minimumStayDurationSeconds
+        let currentMinMinutes = Int(currentMinSeconds / 60)
+
+        // 1. 到着時刻が不明（distantPast）な場合
         guard rawArrival != Date.distantPast else {
-            print("⚠️ 到着時刻が不明(distantPast)なCLVisitのためスキップしました")
+            saveDebugLog(
+                rawArrival: rawArrival,
+                rawDeparture: rawDeparture,
+                coordinate: coordinate,
+                accuracy: accuracy,
+                status: "⚠️ 到着時刻不明で破棄",
+                note: "arrivalDate が distantPast のためスキップしました"
+            )
             return
         }
 
         let isDepartureConfirmed = (rawDeparture != Date.distantFuture)
 
-        // 2. 出発時刻が確定している場合のチェック
+        // 2. 出発時刻が確定している場合
         if isDepartureConfirmed {
-            // (A) 開始時刻と終了時刻が逆転・同一している異常データは破棄
             guard rawDeparture > rawArrival else {
-                print("⚠️ 時刻逆転データ(arrival: \(rawArrival), departure: \(rawDeparture))を破棄しました")
+                saveDebugLog(
+                    rawArrival: rawArrival,
+                    rawDeparture: rawDeparture,
+                    coordinate: coordinate,
+                    accuracy: accuracy,
+                    status: "⚠️ 時刻逆転で破棄",
+                    note: "出発時刻が到着時刻以前になっている異常データのため破棄しました"
+                )
                 return
             }
 
-            let duration = rawDeparture.timeIntervalSince(rawArrival)
+            let durationSeconds = rawDeparture.timeIntervalSince(rawArrival)
+            let durationMinutesString = String(format: "%.1f分", durationSeconds / 60.0)
 
-            // (B) すでに「到着時（departureDate == nil）」に仮保存された同一ログがあるか検索
+            // 既存の滞在中ログがあれば更新または削除
             if let existingLog = findMatchingOngoingVisit(arrival: rawArrival, coordinate: coordinate) {
-                if duration < minimumStayDurationSeconds {
-                    // 10分未満の立ち止まりだった場合は、仮保存していたログ自体を削除する
-                    print("🗑️ 滞在時間が短いため(\(Int(duration / 60))分)、仮ログを削除しました")
+                if durationSeconds < currentMinSeconds {
                     modelContext.delete(existingLog)
+                    try? modelContext.save()
+                    saveDebugLog(
+                        rawArrival: rawArrival,
+                        rawDeparture: rawDeparture,
+                        coordinate: coordinate,
+                        accuracy: accuracy,
+                        status: "⏭️ 時間不足で削除",
+                        note: "滞在 \(durationMinutesString) ＜ 設定閾値 \(currentMinMinutes)分 のため仮ログを削除"
+                    )
                 } else {
-                    // 10分以上滞在していた場合は、出発時刻を更新して確定させる
-                    print("✅ 既存ログの出発時刻を更新しました (滞在: \(Int(duration / 60))分)")
                     existingLog.departureDate = rawDeparture
+                    try? modelContext.save()
+                    saveDebugLog(
+                        rawArrival: rawArrival,
+                        rawDeparture: rawDeparture,
+                        coordinate: coordinate,
+                        accuracy: accuracy,
+                        status: "✅ 出発時刻を更新",
+                        note: "滞在 \(durationMinutesString)（閾値 \(currentMinMinutes)分以上）で既存ログを更新確定"
+                    )
                 }
-                try? modelContext.save()
                 return
             }
 
-            // (C) 到着時の仮ログがなく、出発確定として新規に届いた場合も10分未満なら破棄
-            guard duration >= minimumStayDurationSeconds else {
-                print("⏭️ 滞在時間が\(Int(minimumStayDurationSeconds / 60))分未満(\(Int(duration))秒)のため記録をスキップしました")
+            // 新規で出発確定通知が届いた場合の閾値チェック
+            guard durationSeconds >= currentMinSeconds else {
+                saveDebugLog(
+                    rawArrival: rawArrival,
+                    rawDeparture: rawDeparture,
+                    coordinate: coordinate,
+                    accuracy: accuracy,
+                    status: "⏭️ 時間不足でスキップ",
+                    note: "滞在 \(durationMinutesString) ＜ 設定閾値 \(currentMinMinutes)分 のため記録せずスキップ"
+                )
                 return
             }
+
+            // 条件クリアで新規保存へ
+            saveDebugLog(
+                rawArrival: rawArrival,
+                rawDeparture: rawDeparture,
+                coordinate: coordinate,
+                accuracy: accuracy,
+                status: "✅ 採用（滞在確定）",
+                note: "滞在 \(durationMinutesString)（閾値 \(currentMinMinutes)分以上）のため新規記録します"
+            )
         } else {
-            // 3. 到着通知（まだ滞在中）の場合：すでに同じ到着時刻のログがあれば重複作成しない
-            if findMatchingOngoingVisit(arrival: rawArrival, coordinate: coordinate) != nil {
-                return
-            }
-            // ※「出発が確定して10分以上と分かってから初めてカードを表示したい」場合は、
-            //   ここの else ブロックで return するように変更することも可能です。
+            // 3. 到着通知（departureDate == distantFuture）の場合
+            saveDebugLog(
+                rawArrival: rawArrival,
+                rawDeparture: rawDeparture,
+                coordinate: coordinate,
+                accuracy: accuracy,
+                status: "🔵 到着検知（待機中）",
+                note: "まだ出発時刻が未確定（滞在中）のイベントです。出発確定時に\(currentMinMinutes)分以上か判定します"
+            )
             return
         }
 
-        // 4. 10分以上の有効な滞在として確定したものだけ、高精度測位または保存へ進む
+        // 4. 有効な滞在として確定したものを測位・保存
         let initialLoc = CLLocation(
             coordinate: coordinate,
             altitude: 0,
@@ -232,26 +280,45 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
             timestamp: Date()
         )
 
-        let confirmedDeparture: Date? = isDepartureConfirmed ? rawDeparture : nil
-
         if accuracy > 0 && accuracy <= accuracyThreshold {
             Task {
                 await finalizeAndSave(
                     bestLocation: initialLoc,
                     arrival: rawArrival,
-                    departure: confirmedDeparture
+                    departure: rawDeparture
                 )
             }
         } else {
             startHighAccuracySampling(
                 initialLocation: initialLoc,
                 arrival: rawArrival,
-                departure: confirmedDeparture
+                departure: rawDeparture
             )
         }
     }
 
-    /// 到着時刻がほぼ同じ（誤差2分以内）または距離が50m以内の未確定ログを探す
+    /// CLVisitの生イベントをデバッグログとしてSwiftDataに保存する
+    private func saveDebugLog(
+        rawArrival: Date,
+        rawDeparture: Date,
+        coordinate: CLLocationCoordinate2D,
+        accuracy: Double,
+        status: String,
+        note: String
+    ) {
+        let log = CLVisitDebugLog(
+            rawArrivalDate: rawArrival,
+            rawDepartureDate: rawDeparture,
+            latitude: coordinate.latitude,
+            longitude: coordinate.longitude,
+            horizontalAccuracy: accuracy,
+            statusSummary: status,
+            detailNote: note
+        )
+        modelContext.insert(log)
+        try? modelContext.save()
+    }
+
     private func findMatchingOngoingVisit(arrival: Date, coordinate: CLLocationCoordinate2D) -> VisitLog? {
         let descriptor = FetchDescriptor<VisitLog>(
             sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
@@ -299,7 +366,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         arrival: Date,
         departure: Date?
     ) async {
-        // 保存直前にも、万が一時刻の逆転がないか最終ガード
         let validDeparture: Date?
         if let dep = departure, dep > arrival {
             validDeparture = dep

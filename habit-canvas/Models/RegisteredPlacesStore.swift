@@ -10,12 +10,11 @@ import Foundation
 import CoreLocation
 import Combine
 
-/// 事前登録された「自宅」「仕事」の座標を管理するクラス
+/// 事前登録された「自宅」「仕事」の座標、およびデバッグ設定値を管理するクラス
 @MainActor
 final class RegisteredPlacesStore: ObservableObject {
     static let shared = RegisteredPlacesStore()
 
-    // 判定半径（自宅: 60m以内、仕事: 80m以内）
     let homeRadiusMeters: Double = 60.0
     let workRadiusMeters: Double = 80.0
 
@@ -27,13 +26,32 @@ final class RegisteredPlacesStore: ObservableObject {
         didSet { saveCoordinate(workCoordinate, latKey: "registered_work_lat", lonKey: "registered_work_lon") }
     }
 
+    /// 【追加】最小滞在時間（分） - デフォルトは10分
+    @Published var minimumStayMinutes: Int {
+        didSet {
+            let clamped = max(0, minimumStayMinutes)
+            if minimumStayMinutes != clamped {
+                minimumStayMinutes = clamped
+            }
+            UserDefaults.standard.set(minimumStayMinutes, forKey: "debug_minimum_stay_minutes")
+        }
+    }
+
+    /// 秒数換算した最小滞在時間（LocationServiceで使用）
+    var minimumStayDurationSeconds: TimeInterval {
+        TimeInterval(minimumStayMinutes * 60)
+    }
+
     private init() {
+        if UserDefaults.standard.object(forKey: "debug_minimum_stay_minutes") != nil {
+            self.minimumStayMinutes = UserDefaults.standard.integer(forKey: "debug_minimum_stay_minutes")
+        } else {
+            self.minimumStayMinutes = 10
+        }
         self.homeCoordinate = loadCoordinate(latKey: "registered_home_lat", lonKey: "registered_home_lon")
         self.workCoordinate = loadCoordinate(latKey: "registered_work_lat", lonKey: "registered_work_lon")
     }
 
-    /// 渡された座標が「自宅」または「仕事」の半径内に入っているか判定する
-    /// （両方に入っている場合は、中心座標からの距離がより近い方を採用する）
     func matchRegisteredMode(for coordinate: CLLocationCoordinate2D) -> (mode: LifeMode, distance: Double)? {
         let target = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
         var candidates: [(mode: LifeMode, distance: Double)] = []
@@ -54,7 +72,6 @@ final class RegisteredPlacesStore: ObservableObject {
             }
         }
 
-        // 両方の半径に入っている場合は、より距離が近い方を返す
         return candidates.min(by: { $0.distance < $1.distance })
     }
 
