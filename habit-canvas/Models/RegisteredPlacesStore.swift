@@ -33,14 +33,16 @@ final class RegisteredPlacesStore: ObservableObject {
     }
 
     /// 渡された座標が「自宅」または「仕事」の半径内に入っているか判定する
+    /// （両方に入っている場合は、中心座標からの距離がより近い方を採用する）
     func matchRegisteredMode(for coordinate: CLLocationCoordinate2D) -> (mode: LifeMode, distance: Double)? {
         let target = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+        var candidates: [(mode: LifeMode, distance: Double)] = []
 
         if let home = homeCoordinate {
             let homeLoc = CLLocation(latitude: home.latitude, longitude: home.longitude)
             let dist = target.distance(from: homeLoc)
             if dist <= homeRadiusMeters {
-                return (.home, dist)
+                candidates.append((.home, dist))
             }
         }
 
@@ -48,11 +50,12 @@ final class RegisteredPlacesStore: ObservableObject {
             let workLoc = CLLocation(latitude: work.latitude, longitude: work.longitude)
             let dist = target.distance(from: workLoc)
             if dist <= workRadiusMeters {
-                return (.work, dist)
+                candidates.append((.work, dist))
             }
         }
 
-        return nil
+        // 両方の半径に入っている場合は、より距離が近い方を返す
+        return candidates.min(by: { $0.distance < $1.distance })
     }
 
     private func saveCoordinate(_ coord: CLLocationCoordinate2D?, latKey: String, lonKey: String) {

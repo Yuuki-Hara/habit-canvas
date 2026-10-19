@@ -22,7 +22,8 @@ struct BaseLocationSettingsSheetView: View {
 
     @State private var selectedTarget: TargetType = .home
     @State private var cameraPosition: MapCameraPosition = .userLocation(fallback: .automatic)
-    @State private var mapCenterCoordinate: CLLocationCoordinate2D = CLLocationCoordinate2D(latitude: 35.681236, longitude: 139.767125)
+    @State private var mapCenterCoordinate: CLLocationCoordinate2D? = nil
+    @State private var duplicateWarningMessage: String? = nil
 
     var body: some View {
         NavigationStack {
@@ -32,14 +33,20 @@ struct BaseLocationSettingsSheetView: View {
                     registeredRow(
                         title: "🏠 自宅 (半径\(Int(store.homeRadiusMeters))m)",
                         coordinate: store.homeCoordinate,
-                        onFocus: { focusMap(on: $0) },
+                        onFocus: {
+                            selectedTarget = .home
+                            focusMap(on: $0)
+                        },
                         onClear: { store.homeCoordinate = nil }
                     )
 
                     registeredRow(
                         title: "🏢 仕事 (半径\(Int(store.workRadiusMeters))m)",
                         coordinate: store.workCoordinate,
-                        onFocus: { focusMap(on: $0) },
+                        onFocus: {
+                            selectedTarget = .work
+                            focusMap(on: $0)
+                        },
                         onClear: { store.workCoordinate = nil }
                     )
                 }
@@ -53,6 +60,20 @@ struct BaseLocationSettingsSheetView: View {
                     }
                     .pickerStyle(.segmented)
                     .padding(.vertical, 4)
+                    .onChange(of: selectedTarget) { _, newTarget in
+                        duplicateWarningMessage = nil
+                        // タブを切り替えた際、すでに登録済みの場所があればそこへカメラを移動する
+                        switch newTarget {
+                        case .home:
+                            if let home = store.homeCoordinate {
+                                focusMap(on: home)
+                            }
+                        case .work:
+                            if let work = store.workCoordinate {
+                                focusMap(on: work)
+                            }
+                        }
+                    }
 
                     ZStack {
                         Map(position: $cameraPosition) {
@@ -72,7 +93,8 @@ struct BaseLocationSettingsSheetView: View {
                                     .foregroundStyle(.blue.opacity(0.2))
                             }
                         }
-                        .onMapCameraChange(frequency: .onEnd) { context in
+                        // .continuous にすることで、初期表示直後や微調整でも常に中央座標を最新に保つ
+                        .onMapCameraChange(frequency: .continuous) { context in
                             mapCenterCoordinate = context.region.center
                         }
                         .frame(height: 280)
@@ -80,31 +102,54 @@ struct BaseLocationSettingsSheetView: View {
                         // 中央の照準（＋）
                         Image(systemName: "plus.viewfinder")
                             .font(.title)
-                            .foregroundStyle(.red)
+                            .foregroundStyle(selectedTarget == .home ? .green : .blue)
                             .allowsHitTesting(false)
 
-                        // 下部の登録ボタン
+                        // 上部：現在の照準座標プレビュー
                         VStack {
+                            if let center = mapCenterCoordinate {
+                                Text(String(format: "照準座標: %.5f, %.5f", center.latitude, center.longitude))
+                                    .font(.caption2.monospaced())
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 4)
+                                    .background(.ultraThinMaterial)
+                                    .clipShape(Capsule())
+                                    .padding(.top, 8)
+                            }
                             Spacer()
+
+                            // 下部：登録ボタン
                             Button {
                                 registerCurrentMapCenter()
                             } label: {
-                                Label("マップ中央（＋）を「\(selectedTarget.rawValue)」に登録", systemImage: "mappin.and.ellipse")
-                                    .font(.caption.bold())
-                                    .padding(.horizontal, 14)
-                                    .padding(.vertical, 10)
-                                    .background(.ultraThinMaterial)
-                                    .clipShape(Capsule())
-                                    .shadow(radius: 2)
+                                Label(
+                                    "マップ中央（＋）を「\(selectedTarget.rawValue)」に登録",
+                                    systemImage: "mappin.and.ellipse"
+                                )
+                                .font(.caption.bold())
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(selectedTarget == .home ? Color.green : Color.blue)
+                                .foregroundStyle(.white)
+                                .clipShape(Capsule())
+                                .shadow(radius: 3)
                             }
+                            .buttonStyle(.plain)
+                            .disabled(mapCenterCoordinate == nil)
                             .padding(.bottom, 12)
                         }
                     }
                     .listRowInsets(EdgeInsets())
+
+                    if let warning = duplicateWarningMessage {
+                        Text(warning)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
                 } header: {
-                    Text("位置の登録・更新")
+                    Text("位置の登録・更新（現在選択中: \(selectedTarget.rawValue)）")
                 } footer: {
-                    Text("登録された範囲内の滞在は、具体的な住所や近隣店舗名を表示せず、シンプルに「自宅」「仕事」として自動記録されます。")
+                    Text("1. 上のタブで「🏠 自宅」か「🏢 仕事」を選びます。\n2. 地図を動かして中央の「＋」を実際の建物に合わせ、下の登録ボタンを押してください。")
                 }
             }
             .navigationTitle("自宅・仕事の事前登録")
@@ -115,6 +160,14 @@ struct BaseLocationSettingsSheetView: View {
                         dismiss()
                     }
                     .bold()
+                }
+            }
+            .onAppear {
+                // 初回表示時、自宅が登録済みならそこにフォーカス、なければ現在地へ
+                if let home = store.homeCoordinate {
+                    focusMap(on: home)
+                } else {
+                    cameraPosition = .userLocation(fallback: .automatic)
                 }
             }
         }
@@ -163,6 +216,7 @@ struct BaseLocationSettingsSheetView: View {
     }
 
     private func focusMap(on coordinate: CLLocationCoordinate2D) {
+        mapCenterCoordinate = coordinate
         cameraPosition = .region(MKCoordinateRegion(
             center: coordinate,
             latitudinalMeters: 250,
@@ -171,11 +225,29 @@ struct BaseLocationSettingsSheetView: View {
     }
 
     private func registerCurrentMapCenter() {
+        guard let center = mapCenterCoordinate else { return }
+        duplicateWarningMessage = nil
+
         switch selectedTarget {
         case .home:
-            store.homeCoordinate = mapCenterCoordinate
+            if let work = store.workCoordinate {
+                let dist = CLLocation(latitude: center.latitude, longitude: center.longitude)
+                    .distance(from: CLLocation(latitude: work.latitude, longitude: work.longitude))
+                if dist < 30 {
+                    duplicateWarningMessage = "⚠️ 「仕事」の登録位置と非常に近い場所（\(Int(dist))m）が登録されました。"
+                }
+            }
+            store.homeCoordinate = center
+
         case .work:
-            store.workCoordinate = mapCenterCoordinate
+            if let home = store.homeCoordinate {
+                let dist = CLLocation(latitude: center.latitude, longitude: center.longitude)
+                    .distance(from: CLLocation(latitude: home.latitude, longitude: home.longitude))
+                if dist < 30 {
+                    duplicateWarningMessage = "⚠️ 「自宅」の登録位置と非常に近い場所（\(Int(dist))m）が登録されました。地図を動かして職場の位置に合わせてください。"
+                }
+            }
+            store.workCoordinate = center
         }
     }
 }

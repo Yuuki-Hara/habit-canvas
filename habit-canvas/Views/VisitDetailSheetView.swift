@@ -26,7 +26,6 @@ struct VisitDetailSheetView: View {
                 Section {
                     ZStack {
                         Map(position: $cameraPosition) {
-                            // 現在記録されている座標のピン
                             Marker(visit.placeName, coordinate: visit.coordinate)
                                 .tint(.red)
                         }
@@ -35,13 +34,11 @@ struct VisitDetailSheetView: View {
                         }
                         .frame(height: 220)
 
-                        // 画面中央の照準（地図を動かして狙いを定めるアイコン）
                         Image(systemName: "plus.viewfinder")
                             .font(.title2)
                             .foregroundStyle(.blue)
                             .allowsHitTesting(false)
 
-                        // 下部の「この位置で候補を再検索」ボタン
                         VStack {
                             Spacer()
                             Button {
@@ -158,6 +155,22 @@ struct VisitDetailSheetView: View {
                     }
                     LabeledContent("採用された水平誤差", value: String(format: "±%.1f m", visit.horizontalAccuracy))
                 }
+
+                // 5. 削除ボタンセクション
+                Section {
+                    Button(role: .destructive) {
+                        modelContext.delete(visit)
+                        try? modelContext.save()
+                        dismiss()
+                    } label: {
+                        HStack {
+                            Spacer()
+                            Label("この滞在ログを削除", systemImage: "trash")
+                                .font(.body.bold())
+                            Spacer()
+                        }
+                    }
+                }
             }
             .navigationTitle("滞在ログ詳細・補正")
             .navigationBarTitleDisplayMode(.inline)
@@ -181,7 +194,6 @@ struct VisitDetailSheetView: View {
         }
     }
 
-    /// 候補リストの施設をタップしたときに、店名・カテゴリ・ライフモード・座標を一括反映する
     private func applyCandidate(_ candidate: PlaceCandidate) {
         visit.placeName = candidate.name
         visit.rawCategory = candidate.rawCategory
@@ -198,12 +210,10 @@ struct VisitDetailSheetView: View {
         ))
     }
 
-    /// マップ中央の新しい座標で周辺候補を再検索し、結果を更新する
-private func searchCandidatesAtMapCenter() async {
+    private func searchCandidatesAtMapCenter() async {
         isSearchingAtNewCenter = true
         defer { isSearchingAtNewCenter = false }
 
-        // ↓ arrivalDate 引数を外す
         let resolved = await PlaceResolver.resolve(coordinate: mapCenterCoordinate)
         visit.latitude = mapCenterCoordinate.latitude
         visit.longitude = mapCenterCoordinate.longitude

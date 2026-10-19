@@ -1,146 +1,178 @@
-# 機能検証用アプリ（habit-canvas-poc）詳細設計書
+# 機能検証用アプリ（habit-canvas-poc）最新詳細設計書（完全版）
 
 ## 1. 検証の目的とスコープ
 
-本番アプリ（`habit-canvas`）の開発に先立ち、コア技術である「実位置情報を用いた滞在検知（`CLVisit`）」および「座標からの店名・カテゴリ特定（`MapKit`）」の精度を実機で検証するための最小構成アプリ（PoC）を定義する。
+本番アプリ（`habit-canvas`）の開発に向け、コア技術である「実位置情報を用いた滞在検知（`CLVisit`）」「高精度GPSリトライとMapKitによる施設・ライフモード特定」「ユーザーによる直感的な補正と学習サイクル」「週間・月間の回数レポート集計」を実機で検証するためのPoC（概念実証）仕様を定義する。
 
-### 実装する検証機能
+### 実装済み機能一覧
 
-- 実際の位置情報（GPS / `CLVisit`）を取得し、滞在場所を端末内に記録する。
-- 日付ごとのページ切り替え機能を持つ。
-- 選択した日付の滞在場所をマップ上のピンとして表示する。
-- 選択した日付の滞在場所一覧をカード形式で縦に並べて表示する。
-- カードを押下すると詳細画面（モーダル）が立ち上がり、「店名」「MapKitカテゴリ」「緯度・経度」などの生データを確認できる。
+1. **高精度位置情報取得＆リトライ制御**
+   - `CLVisit`（バックグラウンド滞在検知）および検証用の手動現在地記録。
+   - 水平誤差（`horizontalAccuracy`）の閾値を **`5.0m`** とし、超過時は**最大3回まで再試行**。5.0mを下回らなかった場合は、試行の中で**最も誤差が小さかった座標**を採用する。
+2. **4段階のインテリジェント場所特定＆ライフモード自動分類**
+   - **Step 0（事前登録拠点の判定）:** 事前登録された「自宅（半径60m）」「仕事（半径80m）」エリア内であれば、具体的な住所や近隣店舗名を出さず、シンプルに **`自宅`** / **`仕事`** として即確定する（プライバシー保護＆誤爆防止）。
+   - **Step 1（過去の手動修正履歴の学習）:** 過去にユーザーが手動で修正した場所から**半径40m以内**であれば、その店舗名・カテゴリ・ライフモードを最優先で1位に採用する。
+   - **Step 2（ノイズ除外 ＋ 周辺上位5件の多数決）:** ATM・駐車場・トイレ等のノイズ施設を除外した上で半径60m以内の施設候補（最大8件）を取得。雑居ビル等で1位の店名がズレても、**上位5件のライフモードの多数決**によって大分類（外食・自己投資など）を正確に判定する。
+   - **Step 3（逆ジオコーディング・フォールバック）:** 周囲に店舗がない場合は住所（〇〇付近）を取得し、「📦 その他」に分類する。
+3. **デイリーログ画面（日付切替・マップ・カード一覧・スワイプ削除）**
+   - 日付ごとの滞在ピン表示マップと、時系列の滞在カードリスト。
+   - カードの左スワイプ（または詳細画面の最下部ボタン）による不要ログの削除機能。
+4. **詳細・補正シート（候補1タップ選択 ＆ マップ照準再検索）**
+   - 周辺候補リストからの1タップ切り替え、ライフモードの直接変更、およびマップをドラッグして中央の照準（＋）の位置で候補を再検索する機能。
+5. **週間・月間レポート画面（SCR-03）**
+   - お出かけ系ライフモード（💪自己投資・🍽️外食・⛺️レジャー・📦その他）の週間・月間「回数（件数）」を棒グラフ（Swift Charts）とカードで可視化。
+   - 各ライフモード行のタップによる訪問履歴内訳のアコーディオン展開表示。
 
 ---
 
 ## 2. ファイル構成（ディレクトリ構造）
 
 - **ターゲット環境:** iOS 17.0以降
-- **使用フレームワーク:** SwiftUI, SwiftData, CoreLocation, MapKit
+- **使用フレームワーク:** SwiftUI, SwiftData, CoreLocation, MapKit, Charts, Combine
 
 ```text
 HabitCanvasPoC/
-├── HabitCanvasPoCApp.swift          # アプリのエントリーポイント・SwiftData初期化
-├── Info.plist                       # 位置情報・バックグラウンド権限の定義
+├── HabitCanvasPoCApp.swift               # アプリ起動・SwiftData初期化・環境オブジェクト注入
+├── Info.plist                            # 位置情報権限・Background Modes定義
 │
 ├── Models/
-│   └── VisitLog.swift               # 滞在記録のデータモデル（SwiftData）
+│   ├── VisitLog.swift                    # 滞在記録モデル（SwiftData）・LifeMode定義・候補構造体
+│   └── RegisteredPlacesStore.swift       # 「自宅」「仕事」の事前登録座標管理（UserDefaults）
 │
 ├── Services/
-│   ├── LocationService.swift        # CLVisitの監視・現在地取得の制御
-│   └── PlaceResolver.swift          # 緯度経度から店名・MapKitカテゴリを特定する処理
+│   ├── LocationService.swift             # CLVisit監視・閾値5m/最大3回リトライ測位・保存処理
+│   └── PlaceResolver.swift               # 拠点照合・学習履歴照合・ノイズ除外POI検索・多数決判定
 │
 └── Views/
-    ├── DailyLogPageView.swift       # 【メイン画面】日付切替 ＋ マップ ＋ カード一覧
+    ├── MainTabView.swift                 # 下部タブバー（デイリーログ / レポート）
+    ├── DailyLogPageView.swift            # 【タブ1】日付切替＋マップ＋カード一覧（スワイプ削除対応）
     ├── Components/
-    │   ├── DateHeaderView.swift     # 日付切り替えバー（＜ 2026/10/16 ＞）
-    │   ├── DailyMapView.swift       # その日の滞在ピンを表示するマップビュー
-    │   └── VisitCardView.swift      # 縦に並ぶ滞在場所のカードUI
-    └── VisitDetailSheetView.swift   # 【詳細画面】カード押下時に立ち上がるシート
+    │   └── DailyComponents.swift         # DateHeaderView / DailyMapView / VisitCardView
+    ├── VisitDetailSheetView.swift        # 【詳細・補正】マップ照準再検索＋候補選択＋生データ確認＋削除
+    ├── BaseLocationSettingsSheetView.swift # 【拠点設定】自宅・仕事の事前登録シート
+    └── ReportPageView.swift              # 【タブ2】週間・月間のライフモード別回数グラフ＆内訳リスト
 ```
 
 ---
 
-## 3. データモデル設計 (`Models/VisitLog.swift`)
+## 3. データモデル設計
 
-SwiftDataの `@Model` マクロを使用し、取得した滞在履歴を端末内に永続化する。
+### 3.1 6つのライフモード定義 (`LifeMode`)
 
-| プロパティ名         | 型       | 説明                                                    |
-| :------------------- | :------- | :------------------------------------------------------ |
-| `id`                 | `UUID`   | 一意の識別子（初期値: `UUID()`）                        |
-| `arrivalDate`        | `Date`   | 到着日時（※日付ごとのページ絞り込み基準に使用）         |
-| `departureDate`      | `Date?`  | 出発日時（滞在中で未確定の場合は `nil`）                |
-| `latitude`           | `Double` | 緯度                                                    |
-| `longitude`          | `Double` | 経度                                                    |
-| `horizontalAccuracy` | `Double` | 位置情報の誤差半径（メートル）※精度検証用               |
-| `placeName`          | `String` | MapKitから取得した店名・施設名                          |
-| `rawCategory`        | `String` | MapKitの公式カテゴリ文字列（例: `"MKPOICategoryCafe"`） |
+時間帯による推測は行わず、自宅・仕事は「事前登録座標」、それ以外のお出かけは「MapKitカテゴリ（および手動学習）」から分類する。
+
+| ライフモード                    | アイコン | 判定基準（MapKitカテゴリ / 拠点判定）                                                                                                                      | レポートでの扱い                 |
+| :------------------------------ | :------: | :--------------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------- |
+| **自宅** (`home`)               |    🏠    | 事前登録した「自宅」座標から**半径60m以内**                                                                                                                | ベース拠点（下部枠）             |
+| **仕事** (`work`)               |    🏢    | 事前登録した「仕事」座標から**半径80m以内**                                                                                                                | ベース拠点（下部枠）             |
+| **自己投資** (`selfInvestment`) |    💪    | `.fitnessCenter`, `.library`, `.museum`, `.planetarium`, `.school`, `.university`, 書店等                                                                  | **お出かけアクション（主集計）** |
+| **外食** (`dining`)             |    🍽️    | `.cafe`, `.restaurant`, `.bakery`, `.brewery`, `.foodMarket`, `.winery`, `.distillery`                                                                     | **お出かけアクション（主集計）** |
+| **レジャー** (`leisure`)        |    ⛺️    | `.movieTheater`, `.theater`, `.nightlife`, `.park`, `.amusementPark`, `.aquarium`, `.beach`, `.campground`, `.marina`, `.nationalPark`, `.stadium`, `.zoo` | **お出かけアクション（主集計）** |
+| **その他** (`other`)            |    📦    | 上記以外のPOI（コンビニ・スーパー・病院・役所等）、または施設なしの住所                                                                                    | **お出かけアクション（主集計）** |
+
+### 3.2 `VisitLog` モデル (`Models/VisitLog.swift`)
+
+SwiftDataの `@Model` マクロで永続化するエンティティ。
+
+| プロパティ名             | 型       | 説明                                                                   |
+| :----------------------- | :------- | :--------------------------------------------------------------------- |
+| `id`                     | `UUID`   | 一意の識別子                                                           |
+| `arrivalDate`            | `Date`   | 到着日時（日付ページおよび週間・月間レポートの集計基準）               |
+| `departureDate`          | `Date?`  | 出発日時（滞在中または手動記録時は `nil`）                             |
+| `latitude` / `longitude` | `Double` | 採用された緯度・経度                                                   |
+| `horizontalAccuracy`     | `Double` | 採用された水平誤差半径（メートル）                                     |
+| `placeName`              | `String` | 店名・施設名（自宅/仕事エリア内は `"自宅"` / `"仕事"` と記録）         |
+| `rawCategory`            | `String` | MapKitカテゴリ文字列（自宅/仕事エリア内は `"登録スポット"`）           |
+| `lifeModeRaw`            | `String` | `LifeMode` の rawValue                                                 |
+| `isManuallyEdited`       | `Bool`   | ユーザーが手動修正（または学習データ・登録拠点から確定）したかのフラグ |
+| `candidatesData`         | `Data?`  | 周辺の施設候補リスト（`[PlaceCandidate]` をJSONエンコードしたデータ）  |
+
+### 3.3 `RegisteredPlacesStore` (`Models/RegisteredPlacesStore.swift`)
+
+`UserDefaults` を用いて事前登録拠点を永続化するシングルトンストア。
+
+- `homeCoordinate`: 自宅の緯度・経度（判定半径：`60.0m`）
+- `workCoordinate`: 仕事の緯度・経度（判定半径：`80.0m`）
 
 ---
 
 ## 4. サービス（裏側のロジック）詳細設計
 
-### 4.1 `LocationService.swift`（位置情報・滞在検知エンジン）
+### 4.1 `LocationService.swift`（高精度リトライ測位＆永続化）
 
-`CLLocationManager` を管理し、バックグラウンドでの滞在検知と検証用の手動記録を行う。
+1. **高精度サンプリング開始 (`startHighAccuracySampling`):**
+   - `desiredAccuracy = kCLLocationAccuracyBestForNavigation` を使用。
+   - `CLVisit` 検知時または「現在地を記録(検証用)」ボタン押下時に、初期誤差が `5.0m` を超えている場合は連続測位（`startUpdatingLocation`）を開始する。
+2. **最大3回リトライと最小誤差の採用:**
+   - 受信した新鮮なGPSサンプル（直近5秒以内）を `collectedLocations` 配列に蓄積する。
+   - 途中で `horizontalAccuracy <= 5.0m` を満たすサンプルが来たら即座に採用して測位を終了する。
+   - `5.0m` を超えている場合は最大3回まで再試行（1試行あたり最大4秒のタイムアウト付き）を行い、3回終了時点で `collectedLocations` の中から **`horizontalAccuracy` が最小の座標**を選んで確定させる。
+3. **学習データの抽出と保存 (`finalizeAndSave`):**
+   - 保存前にSwiftDataから `isManuallyEdited == true` の過去ログを抽出し、`LearnedPlaceSnapshot` 配列として `PlaceResolver` に渡す。
 
-- **権限リクエスト処理:**
-  - 初回起動時に `requestWhenInUseAuthorization()`（使用中のみ許可）を実行。
-  - 許可された後、`requestAlwaysAuthorization()`（常に許可）への昇格をリクエストする。
-- **本番用の滞在監視 (`startMonitoringVisits`):**
-  - `manager.startMonitoringVisits()` を呼び出し、OSによる省電力の滞在監視を開始する。
-  - `locationManager(_:didVisit:)` デリゲートが発火したら、受け取った `CLVisit` の座標を `PlaceResolver` に渡して店名・カテゴリを取得し、`VisitLog` として `ModelContext`（SwiftData）へ保存する。
-  - ※ `CLVisit.departureDate` が `Date.distantFuture` と等しい場合は `departureDate = nil` として保存する。
-- **検証用の即時記録機能 (`recordCurrentLocationForTest`):**
-  - 実際の `CLVisit` は15〜20分以上の滞在がないと発火しないため、移動中や開発中に即座にテストできるよう、`requestLocation()` で現在のGPS座標を1回取得し、擬似的に滞在ログとして保存するデバッグ用メソッドを用意する。
+### 4.2 `PlaceResolver.swift`（4段階の場所・モード特定エンジン）
 
-### 4.2 `PlaceResolver.swift`（MapKit 店名・カテゴリ特定）
+受け取った座標に対して、以下の優先順位で場所とライフモードを特定する。
 
-緯度・経度から、最も近い施設の「店名」と「MapKitカテゴリ」を非同期（`async/await`）で取得する。
-
-- **POI（施設）検索ステップ:**
-  1. 受け取った緯度・経度を中心に、半径50mの `MKLocalPointsOfInterestRequest` を生成する。
-  2. `MKLocalSearch(request:)` を実行し、周辺の `MKMapItem` 配列を取得する。
-  3. 取得した候補の中から、元の滞在座標との距離（`CLLocation.distance(from:)`）が最も近い `MKMapItem` を1つ選択する。
-  4. そのアイテムの `name`（店名）と `pointOfInterestCategory?.rawValue`（カテゴリ文字列）を返却する。
-- **フォールバック処理（周辺に店舗がない場合）:**
-  - 半径50m以内にPOIが見つからなかった場合（自宅や住宅街など）は、`CLGeocoder().reverseGeocodeLocation()` を実行する。
-  - 取得した住所（例: `"〇〇区〇〇"`）を `placeName` にセットし、`rawCategory` には `"カテゴリなし（住宅・その他）"` をセットして返却する。
+1. **Step 0：自宅・仕事の事前登録エリア判定（最優先）**
+   - `RegisteredPlacesStore.shared.matchRegisteredMode(for:)` を呼び出す。
+   - 自宅（60m以内）または仕事（80m以内）に該当した場合、MapKit通信を行わず、`primaryName = "自宅"`（または `"仕事"`）、`primaryCategory = "登録スポット"` として即座に返却する。
+2. **Step 1：過去の手動修正データ（半径40m以内）の検索**
+   - `learnedPlaces` の中から現在地との距離が `40.0m` 以内のものを探し、最も近いものを保持する。
+3. **Step 2：ノイズ施設を除外したMapKit周辺検索**
+   - `MKPointOfInterestFilter(excluding:)` を用い、以下のノイズカテゴリを検索段階から除外する：
+     - `.atm`, `.parking`, `.restroom`, `.evCharger`, `.publicTransport`, `.carRental`, `.gasStation`
+   - 半径 `60.0m` 以内の施設を取得し、距離の近い順にソートして最大8件の候補リスト（`[PlaceCandidate]`）を生成する。
+   - Step 1で学習データがヒットしていた場合は、その学習データを候補先頭および1位として確定して返却する。
+   - 新規の場所の場合は、1位の店舗名を仮セットしつつ、**上位5件の候補のライフモードで多数決（`calculateMajorityLifeMode`）**を行い、最多のライフモードを初期値として採用する。
+4. **Step 3：逆ジオコーディング（フォールバック）**
+   - 周辺にPOIが1件もない場合は `CLGeocoder` で住所（「〇〇区〇〇 付近」）を取得し、ライフモードは `.other`（その他）とする。
 
 ---
 
 ## 5. 画面（UI）詳細設計
 
-### 5.1 `DailyLogPageView.swift`（日付ごとページ・メイン画面）
+### 5.1 `MainTabView.swift`（下部タブナビゲーション）
 
-1画面で選択日の「地図」と「滞在カード一覧」を確認できる画面。
+- **タブ1（`DailyLogPageView`）:** 「📍 デイリーログ」
+- **タブ2（`ReportPageView`）:** 「📊 レポート」
 
-- **レイアウト構成:**
+### 5.2 `DailyLogPageView.swift`（デイリーログ画面）
 
-```text
-+---------------------------------------+
-|  [＜]    2026年10月16日 (金)    [＞]  |  <-- DateHeaderView（日付切替）
-+---------------------------------------+
-|                                       |
-|        🗺️ マップビュー (高さ240pt)     |  <-- DailyMapView（滞在ピン表示）
-|           [📍]       [📍]             |
-|                                       |
-+---------------------------------------+
-|  📋 滞在場所一覧 (2件)    [+ 現在地記録]|  <-- デバッグ用即時記録ボタンを配置
-|  +---------------------------------+  |
-|  | 10:15 - 11:30                   |  |
-|  | スターバックス 〇〇店         ＞|  |  <-- VisitCardView（カード一覧）
-|  | 🏷️ MKPOICategoryCafe            |  |
-|  +---------------------------------+  |
-|  | 12:00 - 13:10                   |  |
-|  | 〇〇食堂                      ＞|  |
-|  | 🏷️ MKPOICategoryRestaurant      |  |
-|  +---------------------------------+  |
-+---------------------------------------+
-```
+- **ナビゲーションバー右上:** 「⚙️（自宅・仕事設定）」ボタンを配置し、`BaseLocationSettingsSheetView` をモーダル起動する。
+- **上部:** 位置情報権限が「常に許可」でない場合の警告バナー、日付切り替えバー（`DateHeaderView`）、その日のピンを表示するマップ（`DailyMapView`）。
+- **中部:** 件数表示、「＋ 現在地を記録(検証用)」ボタン、およびリトライ測位中のリアルタイムステータス表示（例：`精度5m超過のため再試行中 (2/3回目)...`）。
+- **下部（カード一覧）:**
+  - 透過スタイルの `List` 内にカード型UI（`VisitCardView`）を配置。
+  - **カードタップ:** `VisitDetailSheetView`（詳細・補正画面）を起動。
+  - **左スワイプ（`.swipeActions`）:** 赤い「削除」ボタンを表示し、SwiftDataから該当ログを即座に削除する。
 
-- **状態管理とフィルタリング:**
-  - `@State private var selectedDate: Date = .now` を保持する。
-  - `Calendar.current.startOfDay(for: selectedDate)` から翌日0時までの範囲に `arrivalDate` が含まれる `VisitLog` を到着時刻順（昇順）で抽出し、マップとカード一覧に渡す。
-- **各コンポーネントの役割:**
-  - **`DateHeaderView`:** 左右のボタンで `selectedDate` を1日ずつ増減させる。日付テキスト部分を `DatePicker` にし、カレンダーから任意の日付へ移動可能にする。
-  - **`DailyMapView`:** SwiftUIの `Map` を使用。抽出された `VisitLog` の座標に `Marker(visit.placeName, coordinate: ...)` をピン表示する。
-  - **`VisitCardView`:** 到着〜出発時刻、店名、`rawCategory` をカード形式で表示する。タップ時に `selectedVisit` に自身をセットし、詳細シート（`.sheet(item: $selectedVisit)`）を起動する。
+### 5.3 `VisitDetailSheetView.swift`（詳細・補正シート）
 
-### 5.2 `VisitDetailSheetView.swift`（カード押下時の詳細画面）
+1. **マップ操作＆再検索セクション:**
+   - マップ中央に固定照準アイコン（`＋`）を表示。地図をドラッグして実際の建物に照準を合わせ、「マップ中央の位置で候補を再検索」ボタンを押すと、その座標で `PlaceResolver` を再実行して候補リストを洗い替える。
+2. **ライフモード直接変更セクション:**
+   - 6つのライフモードのカプセルボタンを横スクロール配置。1タップでモードを上書きし、`isManuallyEdited = true` として保存する。
+3. **近くの施設候補リスト選択セクション:**
+   - 保持している周辺候補（最大8件）を距離順に表示。タップすると「店名・MapKitカテゴリ・ライフモード・座標」を一括更新し、次回以降の学習データ（`isManuallyEdited = true`）として保存する。
+4. **生データ＆削除セクション:**
+   - 店名、MapKitカテゴリ生文字列、緯度・経度（長押しコピー対応）、水平誤差半径（`±〇〇m`）を表示。
+   - 最下部に「🗑️ この滞在ログを削除」ボタンを配置。
 
-カード押下時にモーダル表示され、取得データの精度を検証するための詳細画面。
+### 5.4 `BaseLocationSettingsSheetView.swift`（自宅・仕事の事前登録シート）
 
-- **表示項目:**
-  1. **個別ズームマップ:** 選択された滞在場所の座標を中心にズームした `Map`（高さ200pt）を表示し、実際の建物とGPS座標のズレを確認できるようにする。
-  2. **基本情報セクション:**
-     - **店名 (`placeName`):** 取得された施設名
-     - **MapKitカテゴリ (`rawCategory`):** `MKPointOfInterestCategory` の生文字列
-  3. **位置情報・日時セクション:**
-     - **緯度 (`latitude`) / 経度 (`longitude`):** 小数点以下6桁まで表示（長押しでコピー可能にする）
-     - **水平精度 (`horizontalAccuracy`):** `±〇〇 m` の形式で誤差半径を表示
-     - **滞在日時:** 到着日時 〜 出発日時（および滞在分数の計算値）
+- 現在の「🏠 自宅（半径60m）」「🏢 仕事（半径80m）」の登録有無・座標確認と個別削除ボタン。
+- セグメントピッカーで登録対象（自宅 / 仕事）を選び、地図を動かして中央の照準（＋）を合わせて登録ボタンを押すだけで座標を保存。マップ上には判定半径を示す半透明のサークル（`MapCircle`）を描画する。
+
+### 5.5 `ReportPageView.swift`（週間・月間レポート画面 / SCR-03）
+
+1. **期間スコープ＆ページ送りヘッダー:**
+   - 「週間」「月間」のセグメント切り替えと、`＜` `＞` ボタンによる前後の週・月への移動。
+2. **お出かけアクション合計 ＆ 棒グラフ（Swift Charts）:**
+   - 期間内の「💪 自己投資」「🍽️ 外食」「⛺️ レジャー」「📦 その他」の合計回数を大きく表示し、モード別の回数をカラフルな `BarMark`（棒グラフ）で描画する。
+3. **モード別回数リスト（アコーディオン展開）:**
+   - 「お出かけモード別の回数（4種）」と「ベース拠点の記録回数（仕事・自宅の2種）」をセクション分けしてカード表示。
+   - 各カードをタップするとアコーディオンが開き、その期間に記録された該当モードの「日時・場所名」の履歴一覧を確認できる。
 
 ---
 

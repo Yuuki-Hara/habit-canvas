@@ -11,6 +11,7 @@ import SwiftData
 import MapKit
 
 struct DailyLogPageView: View {
+    @Environment(\.modelContext) private var modelContext
     @EnvironmentObject private var locationService: LocationService
     @Query(sort: \VisitLog.arrivalDate, order: .forward) private var allVisits: [VisitLog]
     
@@ -80,28 +81,43 @@ struct DailyLogPageView: View {
                 .padding(.vertical, 10)
                 .background(Color(.systemGroupedBackground))
 
-                ScrollView {
-                    if dailyVisits.isEmpty {
+                // カードリスト（左スワイプで削除可能）
+                if dailyVisits.isEmpty {
+                    ScrollView {
                         ContentUnavailableView(
                             "この日の滞在記録はありません",
                             systemImage: "mappin.slash",
                             description: Text("右上の⚙️ボタンから「自宅」「仕事」を事前登録しておくと、該当エリアの記録がシンプルに表示されます。")
                         )
                         .padding(.top, 30)
-                    } else {
-                        LazyVStack(spacing: 12) {
-                            ForEach(dailyVisits) { visit in
-                                VisitCardView(visit: visit)
-                                    .onTapGesture {
-                                        selectedVisitForDetail = visit
-                                    }
-                            }
-                        }
-                        .padding(.horizontal)
-                        .padding(.bottom, 24)
                     }
+                    .background(Color(.systemGroupedBackground))
+                } else {
+                    List {
+                        ForEach(dailyVisits) { visit in
+                            VisitCardView(visit: visit)
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    selectedVisitForDetail = visit
+                                }
+                                // カードデザインの見た目を保つためのList行調整
+                                .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                                // 左スワイプで削除アクション
+                                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                                    Button(role: .destructive) {
+                                        deleteVisit(visit)
+                                    } label: {
+                                        Label("削除", systemImage: "trash")
+                                    }
+                                }
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .background(Color(.systemGroupedBackground))
                 }
-                .background(Color(.systemGroupedBackground))
             }
             .navigationTitle("HabitCanvas PoC")
             .navigationBarTitleDisplayMode(.inline)
@@ -120,6 +136,14 @@ struct DailyLogPageView: View {
             .sheet(isPresented: $isShowingBaseSettings) {
                 BaseLocationSettingsSheetView()
             }
+        }
+    }
+
+    /// 滞在ログをSwiftDataから削除して保存する
+    private func deleteVisit(_ visit: VisitLog) {
+        withAnimation {
+            modelContext.delete(visit)
+            try? modelContext.save()
         }
     }
 }
