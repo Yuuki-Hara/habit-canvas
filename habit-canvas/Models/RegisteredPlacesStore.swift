@@ -10,7 +10,6 @@ import Foundation
 import CoreLocation
 import Combine
 
-/// 事前登録された「自宅」「仕事」の座標、およびデバッグ設定値を管理するクラス
 @MainActor
 final class RegisteredPlacesStore: ObservableObject {
     static let shared = RegisteredPlacesStore()
@@ -26,7 +25,6 @@ final class RegisteredPlacesStore: ObservableObject {
         didSet { saveCoordinate(workCoordinate, latKey: "registered_work_lat", lonKey: "registered_work_lon") }
     }
 
-    /// 【追加】最小滞在時間（分） - デフォルトは10分
     @Published var minimumStayMinutes: Int {
         didSet {
             let clamped = max(0, minimumStayMinutes)
@@ -37,7 +35,13 @@ final class RegisteredPlacesStore: ObservableObject {
         }
     }
 
-    /// 秒数換算した最小滞在時間（LocationServiceで使用）
+    /// 【追加】自宅・仕事エリアでもPush通知を送るか（デフォルト: 検証用にON）
+    @Published var notifyForBaseLocations: Bool {
+        didSet {
+            UserDefaults.standard.set(notifyForBaseLocations, forKey: "debug_notify_base_locations")
+        }
+    }
+
     var minimumStayDurationSeconds: TimeInterval {
         TimeInterval(minimumStayMinutes * 60)
     }
@@ -48,6 +52,13 @@ final class RegisteredPlacesStore: ObservableObject {
         } else {
             self.minimumStayMinutes = 10
         }
+
+        if UserDefaults.standard.object(forKey: "debug_notify_base_locations") != nil {
+            self.notifyForBaseLocations = UserDefaults.standard.bool(forKey: "debug_notify_base_locations")
+        } else {
+            self.notifyForBaseLocations = true
+        }
+
         self.homeCoordinate = loadCoordinate(latKey: "registered_home_lat", lonKey: "registered_home_lon")
         self.workCoordinate = loadCoordinate(latKey: "registered_work_lat", lonKey: "registered_work_lon")
     }

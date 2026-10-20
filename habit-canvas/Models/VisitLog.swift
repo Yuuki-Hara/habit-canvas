@@ -36,7 +36,6 @@ enum LifeMode: String, Codable, CaseIterable, Identifiable {
         "\(icon) \(rawValue)"
     }
 
-    /// MapKitのカテゴリからライフモードを判定する（自宅・仕事は事前登録座標で判定するためここには含めない）
     static func classify(rawCategory: String?) -> LifeMode {
         guard let raw = rawCategory else {
             return .other
@@ -44,13 +43,10 @@ enum LifeMode: String, Codable, CaseIterable, Identifiable {
 
         let category = MKPointOfInterestCategory(rawValue: raw)
         switch category {
-        // 💪 自己投資
         case .fitnessCenter, .library, .museum, .planetarium, .school, .university:
             return .selfInvestment
-        // 🍽️ 外食
         case .cafe, .restaurant, .bakery, .brewery, .foodMarket, .winery, .distillery:
             return .dining
-        // ⛺️ レジャー
         case .movieTheater, .theater, .nightlife, .park, .amusementPark, .aquarium, .beach, .campground, .marina, .nationalPark, .stadium, .zoo:
             return .leisure
         default:
@@ -88,6 +84,7 @@ final class VisitLog {
     var rawCategory: String
     var lifeModeRaw: String
     var isManuallyEdited: Bool
+    var isIgnored: Bool // 【追加】通知で「登録しない」を選んだ場合の破棄フラグ
     var candidatesData: Data?
 
     init(
@@ -101,6 +98,7 @@ final class VisitLog {
         rawCategory: String = "取得中...",
         lifeMode: LifeMode = .other,
         isManuallyEdited: Bool = false,
+        isIgnored: Bool = false,
         candidates: [PlaceCandidate] = []
     ) {
         self.id = id
@@ -113,6 +111,7 @@ final class VisitLog {
         self.rawCategory = rawCategory
         self.lifeModeRaw = lifeMode.rawValue
         self.isManuallyEdited = isManuallyEdited
+        self.isIgnored = isIgnored
         self.candidatesData = try? JSONEncoder().encode(candidates)
     }
 
@@ -143,7 +142,7 @@ final class VisitLog {
             let end = formatter.string(from: departure)
             return "\(start) - \(end)"
         } else {
-            return "\(start) - 記録"
+            return "\(start) - 滞在中"
         }
     }
 }
