@@ -9,6 +9,8 @@
 import SwiftUI
 
 struct MainTabView: View {
+    @EnvironmentObject private var locationService: LocationService
+
     var body: some View {
         TabView {
             DailyLogPageView()
@@ -21,5 +23,7 @@ struct MainTabView: View {
                     Label("レポート", systemImage: "chart.bar.fill")
                 }
         }
+        // ここで下位のタブ全体に伝播させる
+        .environmentObject(locationService)
     }
 }
