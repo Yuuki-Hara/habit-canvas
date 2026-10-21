@@ -18,6 +18,7 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
     
     private let accuracyThreshold: Double = 5.0
     private let maxRetries: Int = 3
+    private let samePlaceRadiusMeters: Double = 60.0
     
     private var minimumStayDurationSeconds: TimeInterval {
         RegisteredPlacesStore.shared.minimumStayDurationSeconds
@@ -66,28 +67,78 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
-    /// 【検証用】ボタン押下で現在地を即座に記録＆Push通知送信
+    // =========================================================================
+    // 検証用ボタン押下時：
+    // 1. 同じ場所に「滞在中」のカードがあれば → 出発時刻を記録して「出発済」にする
+    // 2. 同じ場所に「滞在中」のカードがなければ → 古い「滞在中」を閉じて、確実に新規「滞在中」カードを追加する
+    // =========================================================================
     func recordCurrentLocationForTest() {
-        guard !isCollectingSamples else { return }
+        if isCollectingSamples {
+            samplingTimeoutTask?.cancel()
+            manager.stopUpdatingLocation()
+            isCollectingSamples = false
+        }
+
+        let now = Date()
+        let fallbackCoord = RegisteredPlacesStore.shared.homeCoordinate
+            ?? CLLocationCoordinate2D(latitude: 35.681236, longitude: 139.767125)
+        let currentLoc = manager.location
+        let currentCoord = currentLoc?.coordinate ?? fallbackCoord
+        let currentAccuracy = (currentLoc != nil && currentLoc!.horizontalAccuracy > 0)
+            ? currentLoc!.horizontalAccuracy
+            : 30.0
+
+        // パターン1：同じ場所（半径60m以内）に「滞在中（departureDate == nil）」のカードがある場合
+        // → そのカードに出発時刻を入れて「出発済」に変化させる（カードは増やさず色を変化させる）
+        if let ongoingSamePlace = findOngoingVisitNear(coordinate: currentCoord) {
+            ongoingSamePlace.departureDate = max(now, ongoingSamePlace.arrivalDate.addingTimeInterval(60))
+            try? modelContext.save()
+
+            saveDebugLog(
+                rawArrival: ongoingSamePlace.arrivalDate,
+                rawDeparture: ongoingSamePlace.departureDate ?? now,
+                coordinate: ongoingSamePlace.coordinate,
+                accuracy: ongoingSamePlace.horizontalAccuracy,
+                status: "✅ 手動テスト：出発確定",
+                note: "滞在中だった「\(ongoingSamePlace.placeName)」を出発済に更新しました（もう一度押すと新規カードが追加されます）"
+            )
+            isRecordingTestLocation = false
+            retryStatusText = "「\(ongoingSamePlace.placeName)」を出発済に更新しました（もう一度押すと新規追加）"
+            return
+        }
+
+        // パターン2：同じ場所に「滞在中」のカードがない場合
+        // → 他の場所に残っている「滞在中」があればすべてクローズし、現在地で新しい「滞在中」カードを作成する
+        closeAllOtherOngoingVisits(at: now, enforceMinDuration: false)
+
         isRecordingTestLocation = true
-        
-        if let currentLoc = manager.location, currentLoc.horizontalAccuracy > 0 {
-            Task {
-                let log = await createOrUpdateVisitLog(
-                    coordinate: currentLoc.coordinate,
-                    accuracy: currentLoc.horizontalAccuracy,
-                    arrival: .now,
-                    departure: nil,
-                    shouldSendNotification: true
-                )
-                if currentLoc.horizontalAccuracy > accuracyThreshold {
-                    startHighAccuracySampling(for: log, initialLocation: currentLoc)
-                } else {
-                    isRecordingTestLocation = false
-                }
+        retryStatusText = "新規の滞在中カードを作成中..."
+
+        Task {
+            // 新規の「滞在中（departure: nil）」カードを確実に作成する
+            let newLog = await insertNewVisitLog(
+                coordinate: currentCoord,
+                accuracy: currentAccuracy,
+                arrival: now,
+                departure: nil,
+                shouldSendNotification: true
+            )
+
+            saveDebugLog(
+                rawArrival: now,
+                rawDeparture: Date.distantFuture,
+                coordinate: currentCoord,
+                accuracy: currentAccuracy,
+                status: "🔵 手動テスト：新規到着（滞在中）",
+                note: "新規の「滞在中」カードを作成しました（\(newLog.placeName)）"
+            )
+
+            if currentAccuracy > accuracyThreshold {
+                startHighAccuracySampling(for: newLog, initialLocation: currentLoc)
+            } else {
+                isRecordingTestLocation = false
+                retryStatusText = ""
             }
-        } else {
-            startHighAccuracySampling(for: nil, initialLocation: nil)
         }
     }
 
@@ -150,14 +201,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
                 if bestLocation.horizontalAccuracy < log.horizontalAccuracy {
                     await updateExistingLogLocation(log, with: bestLocation)
                 }
-            } else {
-                _ = await createOrUpdateVisitLog(
-                    coordinate: bestLocation.coordinate,
-                    accuracy: bestLocation.horizontalAccuracy,
-                    arrival: .now,
-                    departure: nil,
-                    shouldSendNotification: true
-                )
             }
         }
     }
@@ -191,6 +234,9 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
+    // =========================================================================
+    // CLVisit 受信ハンドリング
+    // =========================================================================
     private func handleIncomingVisit(
         rawArrival: Date,
         rawDeparture: Date,
@@ -215,8 +261,14 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
 
         let isDepartureConfirmed = (rawDeparture != Date.distantFuture)
 
-        // パターンA：まだ出発前（滞在中）
+        // パターンA：まだ出発前（滞在中 / departureDate == distantFuture）
         if !isDepartureConfirmed {
+            closeAllOtherOngoingVisits(
+                exceptNear: coordinate,
+                at: rawArrival,
+                enforceMinDuration: true
+            )
+
             let elapsedSinceArrival = Date().timeIntervalSince(rawArrival)
             let elapsedMinutesStr = String(format: "%.1f分", max(0, elapsedSinceArrival) / 60.0)
 
@@ -265,6 +317,11 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
                     self.pendingArrivalWaitTasks.removeValue(forKey: visitKey)
 
                     if self.findMatchingVisit(arrival: rawArrival, coordinate: coordinate) == nil {
+                        self.closeAllOtherOngoingVisits(
+                            exceptNear: coordinate,
+                            at: rawArrival,
+                            enforceMinDuration: true
+                        )
                         _ = await self.createOrUpdateVisitLog(
                             coordinate: coordinate,
                             accuracy: accuracy,
@@ -305,9 +362,7 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         let durationSeconds = rawDeparture.timeIntervalSince(rawArrival)
         let durationMinutesString = String(format: "%.1f分", durationSeconds / 60.0)
 
-        // 1. すでに到着時に保存されたログがある場合
         if let existingLog = findMatchingVisit(arrival: rawArrival, coordinate: coordinate) {
-            // 通知から「登録しない（破棄）」が選ばれていた場合はそのまま無視する
             if existingLog.isIgnored {
                 saveDebugLog(
                     rawArrival: rawArrival,
@@ -346,7 +401,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
             return
         }
 
-        // 2. 既存ログがない場合、滞在時間が閾値以上かチェック
         guard durationSeconds >= currentMinSeconds else {
             saveDebugLog(
                 rawArrival: rawArrival,
@@ -359,7 +413,12 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
             return
         }
 
-        // 3. 新規に出発確定として届いた場合：即保存＆まだ通知していなかったのでPush通知を送る
+        closeAllOtherOngoingVisits(
+            exceptNear: coordinate,
+            at: rawArrival,
+            enforceMinDuration: true
+        )
+
         let createdLog = await createOrUpdateVisitLog(
             coordinate: coordinate,
             accuracy: accuracy,
@@ -389,8 +448,59 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
     }
 
-    // MARK: - ログの作成・更新・検索ヘルパー
+    // MARK: - ログの作成・更新・検索・「滞在中」クローズ処理
 
+    /// 【修正】SwiftDataのPredicateバグを避けるため、全件取得後にメモリ上で「!isIgnored && departureDate == nil」を確実に判定する
+    private func fetchActiveOngoingLogs() -> [VisitLog] {
+        let descriptor = FetchDescriptor<VisitLog>(
+            sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
+        )
+        guard let allLogs = try? modelContext.fetch(descriptor) else { return [] }
+        return allLogs.filter { !$0.isIgnored && $0.departureDate == nil }
+    }
+
+    /// 指定した座標の近く（半径60m以内）で現在「滞在中（departureDate == nil）」になっているログを探す
+    private func findOngoingVisitNear(coordinate: CLLocationCoordinate2D) -> VisitLog? {
+        let ongoingLogs = fetchActiveOngoingLogs()
+        let targetLoc = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+
+        return ongoingLogs.first { log in
+            let logLoc = CLLocation(latitude: log.latitude, longitude: log.longitude)
+            return targetLoc.distance(from: logLoc) <= samePlaceRadiusMeters
+        }
+    }
+
+    /// 他の場所で「滞在中（departureDate == nil）」のまま残っている古いログをすべて指定時刻でクローズする
+    private func closeAllOtherOngoingVisits(
+        exceptNear excludedCoordinate: CLLocationCoordinate2D? = nil,
+        at closingTime: Date,
+        enforceMinDuration: Bool
+    ) {
+        let ongoingLogs = fetchActiveOngoingLogs()
+        guard !ongoingLogs.isEmpty else { return }
+
+        for log in ongoingLogs {
+            if let excluded = excludedCoordinate {
+                let excludedLoc = CLLocation(latitude: excluded.latitude, longitude: excluded.longitude)
+                let logLoc = CLLocation(latitude: log.latitude, longitude: log.longitude)
+                if excludedLoc.distance(from: logLoc) <= samePlaceRadiusMeters {
+                    continue
+                }
+            }
+
+            let finalDeparture = (closingTime > log.arrivalDate) ? closingTime : Date()
+            let duration = finalDeparture.timeIntervalSince(log.arrivalDate)
+
+            if enforceMinDuration && duration < minimumStayDurationSeconds {
+                modelContext.delete(log)
+            } else {
+                log.departureDate = max(finalDeparture, log.arrivalDate.addingTimeInterval(60))
+            }
+        }
+        try? modelContext.save()
+    }
+
+    /// CLVisit用：既存の未出発ログがあればそれを更新し、なければ新規作成する
     private func createOrUpdateVisitLog(
         coordinate: CLLocationCoordinate2D,
         accuracy: Double,
@@ -399,13 +509,30 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         shouldSendNotification: Bool
     ) async -> VisitLog {
         if let existing = findMatchingVisit(arrival: arrival, coordinate: coordinate) {
-            if let dep = departure, dep > arrival {
+            if let dep = departure, dep > existing.arrivalDate {
                 existing.departureDate = dep
             }
             try? modelContext.save()
             return existing
         }
 
+        return await insertNewVisitLog(
+            coordinate: coordinate,
+            accuracy: accuracy,
+            arrival: arrival,
+            departure: departure,
+            shouldSendNotification: shouldSendNotification
+        )
+    }
+
+    /// 新しいVisitLogレコードを確実にSwiftDataへ挿入し、場所解決とPush通知を行う
+    private func insertNewVisitLog(
+        coordinate: CLLocationCoordinate2D,
+        accuracy: Double,
+        arrival: Date,
+        departure: Date?,
+        shouldSendNotification: Bool
+    ) async -> VisitLog {
         let validDeparture: Date? = (departure != nil && departure! > arrival) ? departure : nil
         let learnedSnapshots = fetchLearnedPlaces()
 
@@ -433,7 +560,6 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         }
         try? modelContext.save()
 
-        // 場所解決が完了した時点でインタラクティブPush通知を送信
         if shouldSendNotification {
             await NotificationService.shared.sendVisitRecordedNotification(for: newLog)
         }
@@ -464,18 +590,29 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
         try? modelContext.save()
     }
 
+    /// 【修正】すでに「出発済み（departureDate != nil）」の別セッションのカードを誤って拾わないよう修正
     private func findMatchingVisit(arrival: Date, coordinate: CLLocationCoordinate2D) -> VisitLog? {
         let descriptor = FetchDescriptor<VisitLog>(
             sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
         )
-        guard let logs = try? modelContext.fetch(descriptor) else { return nil }
+        guard let allLogs = try? modelContext.fetch(descriptor) else { return nil }
+        let activeLogs = allLogs.filter { !$0.isIgnored }
         let targetLoc = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
 
-        return logs.first { log in
+        return activeLogs.first { log in
             let timeDiff = abs(log.arrivalDate.timeIntervalSince(arrival))
             let logLoc = CLLocation(latitude: log.latitude, longitude: log.longitude)
             let dist = targetLoc.distance(from: logLoc)
-            return timeDiff < 180 || (log.departureDate == nil && dist < 60)
+
+            // 1. 現在「滞在中（departureDate == nil）」で半径60m以内のカードがあればマッチ
+            if log.departureDate == nil && dist <= samePlaceRadiusMeters {
+                return true
+            }
+            // 2. CLVisitの同一イベント重複通知（arrivalDateが10秒以内かつ同じ場所）であればマッチ
+            if timeDiff < 10 && dist <= samePlaceRadiusMeters {
+                return true
+            }
+            return false
         }
     }
 
@@ -527,10 +664,10 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
 
     private func fetchLearnedPlaces() -> [LearnedPlaceSnapshot] {
         let descriptor = FetchDescriptor<VisitLog>(
-            predicate: #Predicate { $0.isManuallyEdited == true && $0.isIgnored == false },
             sortBy: [SortDescriptor(\.arrivalDate, order: .reverse)]
         )
-        guard let editedLogs = try? modelContext.fetch(descriptor) else { return [] }
+        guard let allLogs = try? modelContext.fetch(descriptor) else { return [] }
+        let editedLogs = allLogs.filter { $0.isManuallyEdited && !$0.isIgnored }
         
         return editedLogs.map { log in
             LearnedPlaceSnapshot(
